@@ -4,7 +4,8 @@ Job Hunter Scraper — Cloud Version
 Runs on Render with headless Playwright + Google Sheets
 """
 
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
+import asyncio
 import anthropic
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -194,22 +195,22 @@ def extract_salary(text):
 def is_uae_national(title):
     return any(w in title.upper() for w in SKIP_KEYWORDS)
 
-def safe_goto(page, url, label):
+async def safe_goto(page, url, label):
     for attempt in range(2):
         try:
-            page.goto(url, timeout=60000, wait_until="domcontentloaded")
-            time.sleep(3)
+            await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            await asyncio.sleep(3)
             return True
         except:
             if attempt == 0:
                 print(f"  Retrying {label}...")
-                time.sleep(5)
+                await asyncio.sleep(5)
             else:
                 print(f"  Skipped {label} (timeout)")
                 return False
 
 # ── SCRAPERS ──────────────────────────────────────────────
-def scrape_bayt(page, seen_set):
+async def scrape_bayt(page, seen_set):
     jobs = []
     urls = [
         ("area manager",       "https://www.bayt.com/en/uae/jobs/area-manager-jobs/"),
@@ -221,17 +222,18 @@ def scrape_bayt(page, seen_set):
         ("retail manager",     "https://www.bayt.com/en/uae/jobs/retail-manager-jobs/"),
     ]
     for label, url in urls:
-        if not safe_goto(page, url, f"Bayt {label}"):
+        if not await safe_goto(page, url, f"Bayt {label}"):
             continue
         try:
-            items = page.query_selector_all('li[class*="has-pointer-d"]')
+            items = await page.query_selector_all('li[class*="has-pointer-d"]')
             count = 0
             for item in items[:10]:
                 try:
-                    title   = item.query_selector('h2').inner_text().strip()
-                    company = item.query_selector('[class*="company"]').inner_text().strip()
-                    link    = item.query_selector('a').get_attribute('href')
-                    salary  = extract_salary(item.inner_text())
+                    title   = await (await item.query_selector('h2')).inner_text()
+                    company = await (await item.query_selector('[class*="company"]')).inner_text()
+                    link    = await (await item.query_selector('a')).get_attribute('href')
+                    salary  = extract_salary(await item.inner_text())
+                    title, company = title.strip(), company.strip()
                     key = f"{company.lower()}_{title.lower()}"
                     if title and len(title) > 5:
                         jobs.append({"title": title, "company": company,
@@ -245,7 +247,7 @@ def scrape_bayt(page, seen_set):
             print(f"  Bayt {label} error: {e}")
     return jobs
 
-def scrape_naukrigulf(page, seen_set):
+async def scrape_naukrigulf(page, seen_set):
     jobs = []
     urls = [
         ("area manager",       "https://www.naukrigulf.com/area-manager-jobs-in-uae"),
@@ -257,26 +259,27 @@ def scrape_naukrigulf(page, seen_set):
         ("retail manager",     "https://www.naukrigulf.com/retail-manager-jobs-in-uae"),
     ]
     for label, url in urls:
-        if not safe_goto(page, url, f"Naukrigulf {label}"):
+        if not await safe_goto(page, url, f"Naukrigulf {label}"):
             continue
         try:
-            time.sleep(2)
-            items = page.query_selector_all('[class*="tuple"]')
+            await asyncio.sleep(2)
+            items = await page.query_selector_all('[class*="tuple"]')
             count = 0
             for item in items[:10]:
                 try:
-                    title_el = item.query_selector('a[class*="title"], h3 a, h2 a, a')
+                    title_el = await item.query_selector('a[class*="title"], h3 a, h2 a, a')
                     if not title_el: continue
-                    title = title_el.inner_text().strip()
+                    title = (await title_el.inner_text()).strip()
                     if len(title) < 5: continue
                     try:
-                        company = item.query_selector('[class*="company"], [class*="org"]').inner_text().strip()
+                        company_el = await item.query_selector('[class*="company"], [class*="org"]')
+                        company = (await company_el.inner_text()).strip()
                     except:
                         company = "Unknown"
-                    link = title_el.get_attribute('href') or ''
+                    link = await title_el.get_attribute('href') or ''
                     if not link.startswith('http'):
                         link = f"https://www.naukrigulf.com{link}"
-                    salary = extract_salary(item.inner_text())
+                    salary = extract_salary(await item.inner_text())
                     key = f"{company.lower()}_{title.lower()}"
                     if company != "Unknown":
                         jobs.append({"title": title, "company": company,
@@ -289,7 +292,7 @@ def scrape_naukrigulf(page, seen_set):
             print(f"  Naukrigulf {label} error: {e}")
     return jobs
 
-def scrape_indeed(page, seen_set):
+async def scrape_indeed(page, seen_set):
     jobs = []
     urls = [
         ("area manager",       "https://ae.indeed.com/jobs?q=area+manager&l=UAE&fromage=1"),
@@ -300,17 +303,18 @@ def scrape_indeed(page, seen_set):
         ("retail manager",     "https://ae.indeed.com/jobs?q=retail+operations+manager&l=UAE&fromage=1"),
     ]
     for label, url in urls:
-        if not safe_goto(page, url, f"Indeed {label}"):
+        if not await safe_goto(page, url, f"Indeed {label}"):
             continue
         try:
-            items = page.query_selector_all('.job_seen_beacon, [class*="jobCard"]')
+            items = await page.query_selector_all('.job_seen_beacon, [class*="jobCard"]')
             count = 0
             for item in items[:10]:
                 try:
-                    title   = item.query_selector('h2').inner_text().strip()
-                    company = item.query_selector('[class*="company"]').inner_text().strip()
-                    link    = item.query_selector('a').get_attribute('href')
-                    salary  = extract_salary(item.inner_text())
+                    title   = await (await item.query_selector('h2')).inner_text()
+                    company = await (await item.query_selector('[class*="company"]')).inner_text()
+                    link    = await (await item.query_selector('a')).get_attribute('href')
+                    salary  = extract_salary(await item.inner_text())
+                    title, company = title.strip(), company.strip()
                     key = f"{company.lower()}_{title.lower()}"
                     if title and len(title) > 5:
                         jobs.append({"title": title, "company": company,
@@ -324,7 +328,7 @@ def scrape_indeed(page, seen_set):
             print(f"  Indeed {label} error: {e}")
     return jobs
 
-def scrape_linkedin(page, seen_set):
+async def scrape_linkedin(page, seen_set):
     jobs = []
     urls = [
         ("area manager",       "https://www.linkedin.com/jobs/search/?keywords=area+manager&location=UAE&f_TPR=r86400"),
@@ -335,26 +339,27 @@ def scrape_linkedin(page, seen_set):
         ("retail manager",     "https://www.linkedin.com/jobs/search/?keywords=retail+operations+manager&location=UAE&f_TPR=r86400"),
     ]
     for label, url in urls:
-        if not safe_goto(page, url, f"LinkedIn {label}"):
+        if not await safe_goto(page, url, f"LinkedIn {label}"):
             continue
         try:
-            time.sleep(3)
-            items = page.query_selector_all('[data-job-id]')
+            await asyncio.sleep(3)
+            items = await page.query_selector_all('[data-job-id]')
             count = 0
             for item in items[:10]:
                 try:
-                    title_el = item.query_selector('a[class*="job-card-container__link"], a[class*="job-card-list__title"], a')
+                    title_el = await item.query_selector('a[class*="job-card-container__link"], a[class*="job-card-list__title"], a')
                     if not title_el: continue
-                    title = title_el.inner_text().strip()
+                    title = (await title_el.inner_text()).strip()
                     if len(title) < 5: continue
                     try:
-                        company = item.query_selector('[class*="company-name"], [class*="subtitle"], h4').inner_text().strip()
+                        company_el = await item.query_selector('[class*="company-name"], [class*="subtitle"], h4')
+                        company = (await company_el.inner_text()).strip()
                     except:
                         company = "Unknown"
-                    link = title_el.get_attribute('href') or ''
+                    link = await title_el.get_attribute('href') or ''
                     if not link.startswith('http'):
                         link = f"https://www.linkedin.com{link}"
-                    salary = extract_salary(item.inner_text())
+                    salary = extract_salary(await item.inner_text())
                     key = f"{company.lower()}_{title.lower()}"
                     if company != "Unknown":
                         jobs.append({"title": title, "company": company,
@@ -387,42 +392,43 @@ def run():
     seen_set = load_seen_before()
     print(f"📂 {len(seen_set)} previously seen jobs loaded from Sheets")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--single-process',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-background-networking',
-            ]
-        )
-        context = browser.new_context(
-            user_agent=(
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/120.0.0.0 Safari/537.36'
-            ),
-            viewport={'width': 1280, 'height': 800}
-        )
-        page = context.new_page()
+    async def scrape_all():
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--single-process',
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-background-networking',
+                ]
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/120.0.0.0 Safari/537.36'
+                ),
+                viewport={'width': 1280, 'height': 800}
+            )
+            page = await context.new_page()
 
-        print("\n🔍 Scraping Bayt...")
-        all_raw = scrape_bayt(page, seen_set)
+            print("\n🔍 Scraping Bayt...")
+            jobs = await scrape_bayt(page, seen_set)
+            print("\n🔍 Scraping Naukrigulf...")
+            jobs += await scrape_naukrigulf(page, seen_set)
+            print("\n🔍 Scraping Indeed...")
+            jobs += await scrape_indeed(page, seen_set)
+            print("\n🔍 Scraping LinkedIn...")
+            jobs += await scrape_linkedin(page, seen_set)
 
-        print("\n🔍 Scraping Naukrigulf...")
-        all_raw += scrape_naukrigulf(page, seen_set)
+            await browser.close()
+            return jobs
 
-        print("\n🔍 Scraping Indeed...")
-        all_raw += scrape_indeed(page, seen_set)
-
-        print("\n🔍 Scraping LinkedIn...")
-        all_raw += scrape_linkedin(page, seen_set)
-
-        browser.close()
+    all_raw = asyncio.run(scrape_all())
 
     print(f"\n📊 Total scraped: {len(all_raw)} — now AI-matching...")
     send_telegram(f"📊 Scraped {len(all_raw)} jobs. Running AI match...")
