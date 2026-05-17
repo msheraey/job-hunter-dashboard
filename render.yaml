@@ -2,7 +2,7 @@ services:
   - type: web
     name: job-hunter-dashboard
     runtime: python
-    buildCommand: pip install -r requirements.txt && playwright install chromium --with-deps
+    buildCommand: pip install --only-binary greenlet greenlet==3.2.3 && pip install -r requirements.txt && playwright install chromium --with-deps
     startCommand: gunicorn -w 1 --timeout 300 -b 0.0.0.0:${PORT:-10000} web_dashboard_cloud:app
     envVars:
       - key: PYTHON_VERSION
