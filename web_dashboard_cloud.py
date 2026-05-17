@@ -370,10 +370,20 @@ def update_status():
     data = request.json
     job = data.get('job', {})
     status = data.get('status', '')
-    
-    # Update in Google Sheets
-    # This requires finding the row - simplified for now
-    return jsonify({'success': True})
+
+    try:
+        sheet = get_sheet()
+        all_values = sheet.get_all_values()
+        job_link = job.get('link', '')
+
+        for i, row in enumerate(all_values[1:], start=1):  # skip header row
+            if len(row) >= 7 and row[6] == job_link:  # column G (index 6) is Link
+                sheet.update_cell(i + 1, 8, status)   # column 8 = Status
+                return jsonify({'success': True})
+
+        return jsonify({'success': False, 'error': 'Job not found in sheet'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
