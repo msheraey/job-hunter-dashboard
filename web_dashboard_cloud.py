@@ -18,22 +18,34 @@ app = Flask(__name__)
 SHEET_ID = os.environ.get('SHEET_ID', 'YOUR_SHEET_ID_HERE')
 SHEET_NAME = "Job Hunter Data"
 
-def get_sheet():
-    """Connect to Google Sheets"""
-    # For Render, you'll store the credentials as environment variable
+# Telegram
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '8972917892:AAGs_Z6xWc67poi7EfVdJpPoJJb_3hs8sJo')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '8872960522')
+
+def get_creds():
+    """Get Google Sheets credentials"""
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     creds_json = os.environ.get('GOOGLE_CREDENTIALS')
     if creds_json:
         creds_dict = json.loads(creds_json)
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    else:
-        # Local development - use file
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
-    
-    client = gspread.authorize(creds)
-    sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
-    return sheet
+        return ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    return ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+
+def get_sheet():
+    """Connect to Google Sheets jobs tab"""
+    client = gspread.authorize(get_creds())
+    return client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
+
+def get_config_sheet():
+    """Get or create the Config worksheet for dashboard triggers"""
+    client = gspread.authorize(get_creds())
+    spreadsheet = client.open_by_key(SHEET_ID)
+    try:
+        return spreadsheet.worksheet("Config")
+    except:
+        ws = spreadsheet.add_worksheet("Config", 10, 2)
+        ws.update('A1:B1', [['trigger', 'IDLE']])
+        return ws
 
 def load_jobs():
     """Load jobs from Google Sheets"""
@@ -165,6 +177,7 @@ HTML_TEMPLATE = """
         <div class="header">
             <h1>🎯 Job Hunter AI Dashboard</h1>
             <p>AI-powered job matching • Tailored CVs • Smart tracking</p>
+            <button id="scraperBtn" class="btn btn-primary" onclick="triggerScraper()" style="margin-top: 15px; padding: 12px 30px; font-size: 16px;">🔍 Run Scraper</button>
         </div>
         
         <div class="stats">
@@ -322,6 +335,33 @@ HTML_TEMPLATE = """
             });
         }
         
+        function triggerScraper() {
+            const btn = document.getElementById('scraperBtn');
+            btn.disabled = true;
+            btn.textContent = '⏳ Starting...';
+
+            fetch('/trigger-scraper', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    btn.textContent = '✅ Triggered!';
+                    alert('🚀 Scraper started!\n\nCheck your Telegram — new jobs will appear in 2-4 minutes.\nRefresh the dashboard when done.');
+                } else {
+                    btn.textContent = '❌ Error';
+                    alert('Error: ' + data.error);
+                }
+                setTimeout(() => {
+                    btn.disabled = false;
+                    btn.textContent = '🔍 Run Scraper';
+                }, 15000);
+            })
+            .catch(err => {
+                btn.disabled = false;
+                btn.textContent = '🔍 Run Scraper';
+                alert('Error: ' + err);
+            });
+        }
+
         function updateStatus(index, status) {
             if (!status) return;
             const job = allJobs[index];
@@ -364,6 +404,27 @@ def generate_cv():
     # Here you would call your Telegram bot or CV builder
     # For now, we'll just acknowledge
     return jsonify({'success': True, 'message': 'CV generation started'})
+
+@app.route('/trigger-scraper', methods=['POST'])
+def trigger_scraper():
+    try:
+        # Write RUN flag to Google Sheets Config tab
+        config = get_config_sheet()
+        config.update('B1', [['RUN']])
+
+        # Notify via Telegram
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": "🚀 <b>Dashboard triggered scraper!</b>\n\nStarting job search now...\nResults in 2-4 minutes.",
+                "parse_mode": "HTML"
+            },
+            timeout=10
+        )
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/update-status', methods=['POST'])
 def update_status():
