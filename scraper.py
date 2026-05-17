@@ -19,7 +19,7 @@ TODAY = date.today().strftime("%Y-%m-%d")
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '8972917892:AAGs_Z6xWc67poi7EfVdJpPoJJb_3hs8sJo')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '8872960522')
 SHEET_ID = os.environ.get('SHEET_ID', '')
-SHEET_NAME = "Job Hunter Data"
+SHEET_NAME = "Sheet1"
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 
 SKIP_KEYWORDS = ['UAEN', 'UAE NATIONAL', 'EMIRATI', 'NATIONAL ONLY', 'NATIONALS ONLY']

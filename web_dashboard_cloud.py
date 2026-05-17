@@ -20,7 +20,7 @@ scraper_status = {"running": False, "last_run": None, "last_result": None}
 
 # Google Sheets setup
 SHEET_ID = os.environ.get('SHEET_ID', 'YOUR_SHEET_ID_HERE')
-SHEET_NAME = "Job Hunter Data"
+SHEET_NAME = "Sheet1"
 
 # Telegram
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '8972917892:AAGs_Z6xWc67poi7EfVdJpPoJJb_3hs8sJo')
