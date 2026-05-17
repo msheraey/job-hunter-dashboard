@@ -2,11 +2,11 @@ services:
   - type: web
     name: job-hunter-dashboard
     runtime: python
-    buildCommand: pip install -r requirements.txt && PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/browsers playwright install chromium --with-deps
+    buildCommand: pip install -r requirements.txt && PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium --with-deps
     startCommand: gunicorn -w 1 --timeout 300 -b 0.0.0.0:${PORT:-10000} web_dashboard_cloud:app
     envVars:
       - key: PLAYWRIGHT_BROWSERS_PATH
-        value: /opt/render/project/src/browsers
+        value: "0"
       - key: SHEET_ID
         sync: false
       - key: GOOGLE_CREDENTIALS
