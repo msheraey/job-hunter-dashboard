@@ -1,9 +1,16 @@
 services:
   - type: web
     name: job-hunter-dashboard
-    runtime: python
-    buildCommand: pip install --only-binary greenlet greenlet==3.2.3 && pip install -r requirements.txt && playwright install chromium --with-deps
-    startCommand: gunicorn -w 1 --timeout 300 -b 0.0.0.0:${PORT:-10000} web_dashboard_cloud:app
+    runtime: docker
+    dockerfilePath: ./Dockerfile
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
+      - key: SHEET_ID
+        sync: false
+      - key: GOOGLE_CREDENTIALS
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
