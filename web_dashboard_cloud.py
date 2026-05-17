@@ -12,7 +12,11 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import requests
 
+import threading
 app = Flask(__name__)
+
+# Track scraper state
+scraper_status = {"running": False, "last_run": None, "last_result": None}
 
 # Google Sheets setup
 SHEET_ID = os.environ.get('SHEET_ID', 'YOUR_SHEET_ID_HERE')
@@ -344,23 +348,47 @@ HTML_TEMPLATE = """
             .then(r => r.json())
             .then(data => {
                 if (data.success) {
-                    btn.textContent = '✅ Triggered!';
-                    alert('🚀 Scraper started!\n\nCheck your Telegram — new jobs will appear in 2-4 minutes.\nRefresh the dashboard when done.');
+                    btn.textContent = '🔄 Running...';
+                    pollScraperStatus();
                 } else {
-                    btn.textContent = '❌ Error';
-                    alert('Error: ' + data.error);
+                    btn.textContent = '⚠️ ' + data.error;
+                    setTimeout(() => { btn.disabled = false; btn.textContent = '🔍 Run Scraper'; }, 5000);
                 }
-                setTimeout(() => {
-                    btn.disabled = false;
-                    btn.textContent = '🔍 Run Scraper';
-                }, 15000);
             })
             .catch(err => {
                 btn.disabled = false;
                 btn.textContent = '🔍 Run Scraper';
-                alert('Error: ' + err);
             });
         }
+
+        function pollScraperStatus() {
+            const btn = document.getElementById('scraperBtn');
+            const interval = setInterval(() => {
+                fetch('/scraper-status')
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.running) {
+                        clearInterval(interval);
+                        btn.textContent = data.last_result || '✅ Done!';
+                        setTimeout(() => {
+                            btn.disabled = false;
+                            btn.textContent = '🔍 Run Scraper';
+                            location.reload();
+                        }, 3000);
+                    }
+                });
+            }, 5000);
+        }
+
+        // Check status on page load (in case scraper is already running)
+        fetch('/scraper-status').then(r => r.json()).then(data => {
+            if (data.running) {
+                const btn = document.getElementById('scraperBtn');
+                btn.disabled = true;
+                btn.textContent = '🔄 Running...';
+                pollScraperStatus();
+            }
+        });
 
         function updateStatus(index, status) {
             if (!status) return;
@@ -407,24 +435,37 @@ def generate_cv():
 
 @app.route('/trigger-scraper', methods=['POST'])
 def trigger_scraper():
-    try:
-        # Write RUN flag to Google Sheets Config tab
-        config = get_config_sheet()
-        config.update('B1', [['RUN']])
+    global scraper_status
+    if scraper_status["running"]:
+        return jsonify({'success': False, 'error': 'Scraper is already running. Check Telegram for updates.'})
 
-        # Notify via Telegram
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": "🚀 <b>Dashboard triggered scraper!</b>\n\nStarting job search now...\nResults in 2-4 minutes.",
-                "parse_mode": "HTML"
-            },
-            timeout=10
-        )
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+    def run_scraper_thread():
+        global scraper_status
+        scraper_status["running"] = True
+        scraper_status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        try:
+            from scraper import run as scraper_run
+            count = scraper_run()
+            scraper_status["last_result"] = f"✅ Found {count} jobs"
+        except Exception as e:
+            scraper_status["last_result"] = f"❌ Error: {str(e)}"
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": TELEGRAM_CHAT_ID,
+                      "text": f"❌ Scraper error: {str(e)[:300]}",
+                      "parse_mode": "HTML"},
+                timeout=10
+            )
+        finally:
+            scraper_status["running"] = False
+
+    thread = threading.Thread(target=run_scraper_thread, daemon=True)
+    thread.start()
+    return jsonify({'success': True, 'message': 'Scraper started!'})
+
+@app.route('/scraper-status')
+def get_scraper_status():
+    return jsonify(scraper_status)
 
 @app.route('/update-status', methods=['POST'])
 def update_status():

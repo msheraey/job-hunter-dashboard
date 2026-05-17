@@ -2,7 +2,7 @@ services:
   - type: web
     name: job-hunter-dashboard
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && playwright install chromium --with-deps
     startCommand: gunicorn web_dashboard_cloud:app
     envVars:
       - key: PYTHON_VERSION
