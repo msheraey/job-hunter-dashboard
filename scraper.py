@@ -370,6 +370,14 @@ def scrape_linkedin(page, seen_set):
 # ── MAIN ──────────────────────────────────────────────────
 def run():
     """Main entry point — called from Flask background thread or CLI"""
+    if not ANTHROPIC_KEY:
+        send_telegram("⚠️ ANTHROPIC_API_KEY not set on Render — AI matching disabled, all jobs will score 70.")
+        print("WARNING: ANTHROPIC_API_KEY not set")
+    if not SHEET_ID:
+        send_telegram("❌ SHEET_ID not set on Render — cannot save jobs. Aborting.")
+        print("ERROR: SHEET_ID not set")
+        return 0
+
     all_apply = []
     deduped   = set()
 
@@ -388,6 +396,8 @@ def run():
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
                 '--single-process',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-background-networking',
             ]
         )
         context = browser.new_context(

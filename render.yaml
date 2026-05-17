@@ -3,7 +3,7 @@ services:
     name: job-hunter-dashboard
     runtime: python
     buildCommand: pip install -r requirements.txt && playwright install chromium --with-deps
-    startCommand: gunicorn web_dashboard_cloud:app
+    startCommand: gunicorn -w 1 --timeout 300 -b 0.0.0.0:${PORT:-10000} web_dashboard_cloud:app
     envVars:
       - key: PYTHON_VERSION
         value: 3.11
