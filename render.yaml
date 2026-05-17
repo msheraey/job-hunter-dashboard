@@ -3,9 +3,9 @@ services:
     name: job-hunter-dashboard
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn web_dashboard_cloud:app
+    startCommand: gunicorn web_dashboard_simple:app
     envVars:
       - key: SHEET_ID
-        value: YOUR_GOOGLE_SHEET_ID_HERE
+        sync: false
       - key: GOOGLE_CREDENTIALS
         sync: false
