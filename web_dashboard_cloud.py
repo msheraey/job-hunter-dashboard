@@ -16,7 +16,7 @@ import threading
 app = Flask(__name__)
 
 # Track scraper state
-scraper_status = {"running": False, "last_run": None, "last_result": None}
+scraper_status = {"running": False, "last_run": None, "last_result": None, "progress": 0, "step": ""}
 
 # Google Sheets setup
 SHEET_ID = os.environ.get('SHEET_ID', 'YOUR_SHEET_ID_HERE')
@@ -169,6 +169,22 @@ HTML_TEMPLATE = """
         .search-bar input { flex: 1; padding: 12px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 16px; }
         .search-bar button { padding: 12px 24px; background: #667eea; color: white; border: none; border-radius: 10px; cursor: pointer; }
         
+        /* Progress Bar */
+        .progress-wrap { display: none; margin-top: 18px; }
+        .progress-meta { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .progress-step { color: #555; font-size: 14px; flex: 1; }
+        .progress-pct { font-weight: 700; color: #667eea; font-size: 16px; min-width: 48px; text-align: right; }
+        .progress-track { background: #e8e8f3; border-radius: 12px; height: 14px; overflow: hidden; box-shadow: inset 0 2px 4px rgba(0,0,0,0.06); }
+        .progress-fill { height: 100%; width: 0%; border-radius: 12px;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.6s cubic-bezier(0.4,0,0.2,1);
+            position: relative; overflow: hidden; }
+        .progress-fill::after { content: ''; position: absolute; top: 0; left: -100%;
+            width: 60%; height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
+            animation: shimmer 1.6s infinite; }
+        @keyframes shimmer { to { left: 200%; } }
+
         @media (max-width: 768px) {
             .container { padding: 10px; }
             th, td { padding: 10px; font-size: 12px; }
@@ -182,6 +198,16 @@ HTML_TEMPLATE = """
             <h1>🎯 Job Hunter AI Dashboard</h1>
             <p>AI-powered job matching • Tailored CVs • Smart tracking</p>
             <button id="scraperBtn" class="btn btn-primary" onclick="triggerScraper()" style="margin-top: 15px; padding: 12px 30px; font-size: 16px;">🔍 Run Scraper</button>
+
+            <div id="progressWrap" class="progress-wrap">
+                <div class="progress-meta">
+                    <span id="progressStep" class="progress-step">Starting...</span>
+                    <span id="progressPct" class="progress-pct">0%</span>
+                </div>
+                <div class="progress-track">
+                    <div id="progressFill" class="progress-fill"></div>
+                </div>
+            </div>
         </div>
         
         <div class="stats">
@@ -339,10 +365,22 @@ HTML_TEMPLATE = """
             });
         }
         
+        function setProgress(pct, step) {
+            document.getElementById('progressFill').style.width = pct + '%';
+            document.getElementById('progressPct').textContent = pct + '%';
+            if (step) document.getElementById('progressStep').textContent = step;
+        }
+
+        function showProgress(visible) {
+            document.getElementById('progressWrap').style.display = visible ? 'block' : 'none';
+        }
+
         function triggerScraper() {
             const btn = document.getElementById('scraperBtn');
             btn.disabled = true;
             btn.textContent = '⏳ Starting...';
+            showProgress(true);
+            setProgress(0, '🚀 Connecting...');
 
             fetch('/trigger-scraper', { method: 'POST' })
             .then(r => r.json())
@@ -351,13 +389,16 @@ HTML_TEMPLATE = """
                     btn.textContent = '🔄 Running...';
                     pollScraperStatus();
                 } else {
-                    btn.textContent = '⚠️ ' + data.error;
-                    setTimeout(() => { btn.disabled = false; btn.textContent = '🔍 Run Scraper'; }, 5000);
+                    btn.disabled = false;
+                    btn.textContent = '🔍 Run Scraper';
+                    showProgress(false);
+                    alert('⚠️ ' + data.error);
                 }
             })
-            .catch(err => {
+            .catch(() => {
                 btn.disabled = false;
                 btn.textContent = '🔍 Run Scraper';
+                showProgress(false);
             });
         }
 
@@ -367,25 +408,33 @@ HTML_TEMPLATE = """
                 fetch('/scraper-status')
                 .then(r => r.json())
                 .then(data => {
+                    const pct = data.progress || 0;
+                    const step = data.step || '';
+                    setProgress(pct, step);
+
                     if (!data.running) {
                         clearInterval(interval);
-                        btn.textContent = data.last_result || '✅ Done!';
+                        setProgress(100, data.step || '✅ Done!');
+                        btn.textContent = '✅ Done!';
                         setTimeout(() => {
                             btn.disabled = false;
                             btn.textContent = '🔍 Run Scraper';
+                            showProgress(false);
                             location.reload();
                         }, 3000);
                     }
                 });
-            }, 5000);
+            }, 3000);
         }
 
-        // Check status on page load (in case scraper is already running)
+        // Restore progress bar if scraper is already running on page load
         fetch('/scraper-status').then(r => r.json()).then(data => {
             if (data.running) {
                 const btn = document.getElementById('scraperBtn');
                 btn.disabled = true;
                 btn.textContent = '🔄 Running...';
+                showProgress(true);
+                setProgress(data.progress || 0, data.step || '🔄 Running...');
                 pollScraperStatus();
             }
         });
@@ -442,13 +491,23 @@ def trigger_scraper():
     def run_scraper_thread():
         global scraper_status
         scraper_status["running"] = True
+        scraper_status["progress"] = 0
+        scraper_status["step"] = "🚀 Starting..."
         scraper_status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        def progress_callback(step, pct):
+            scraper_status["step"] = step
+            scraper_status["progress"] = pct
+
         try:
             from scraper import run as scraper_run
-            count = scraper_run()
+            count = scraper_run(progress_callback=progress_callback)
             scraper_status["last_result"] = f"✅ Found {count} jobs"
+            scraper_status["progress"] = 100
+            scraper_status["step"] = f"✅ Done! {count} jobs found"
         except Exception as e:
             scraper_status["last_result"] = f"❌ Error: {str(e)}"
+            scraper_status["step"] = f"❌ Error: {str(e)[:80]}"
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                 json={"chat_id": TELEGRAM_CHAT_ID,

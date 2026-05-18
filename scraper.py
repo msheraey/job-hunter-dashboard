@@ -308,43 +308,72 @@ async def scrape_indeed(client, seen_set):
     return jobs
 
 # ── MAIN ──────────────────────────────────────────────────
-def run():
+def run(progress_callback=None):
+    """Run the full scrape + AI match pipeline.
+    progress_callback(step: str, pct: int) is called throughout so
+    the web dashboard can display a live progress bar.
+    """
+    def report(step, pct):
+        print(f"[{pct}%] {step}")
+        if progress_callback:
+            try:
+                progress_callback(step, pct)
+            except Exception:
+                pass
+
     if not SHEET_ID:
         send_telegram("❌ SHEET_ID not set on Render — cannot save jobs. Aborting.")
         return 0
     if not ANTHROPIC_KEY:
         send_telegram("⚠️ ANTHROPIC_API_KEY not set — jobs will use default score 70.")
 
+    report("🚀 Starting Job Hunter...", 2)
     send_telegram(f"🚀 Job Hunter started — {TODAY}\nScanning Bayt, Naukrigulf, LinkedIn, Indeed...")
     print(f"\n{'='*50}\n🚀 Job Hunter Cloud — {TODAY}\n{'='*50}")
 
+    report("📂 Loading previous jobs from Sheets...", 5)
     seen_set = load_seen_before()
     print(f"📂 {len(seen_set)} previously seen jobs loaded")
 
     async def scrape_all():
         async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True,
                                      timeout=30.0, verify=False) as client:
-            print("\n🔍 Scraping Bayt...")
+            report("🔍 Scraping Bayt (1/4)...", 10)
             jobs = await scrape_bayt(client, seen_set)
-            print("\n🔍 Scraping Naukrigulf...")
+            report(f"✅ Bayt done ({len(jobs)} found) — Scraping Naukrigulf (2/4)...", 28)
             jobs += await scrape_naukrigulf(client, seen_set)
-            print("\n🔍 Scraping LinkedIn...")
+            ng_count = len(jobs)
+            report(f"✅ Naukrigulf done ({ng_count - len(jobs) + ng_count} total) — Scraping LinkedIn (3/4)...", 46)
             jobs += await scrape_linkedin(client, seen_set)
-            print("\n🔍 Scraping Indeed...")
+            report(f"✅ LinkedIn done — Scraping Indeed (4/4)...", 62)
             jobs += await scrape_indeed(client, seen_set)
+            report(f"✅ All platforms scraped: {len(jobs)} raw jobs", 70)
             return jobs
 
+    report("🌐 Connecting to job boards...", 8)
     all_raw = asyncio.run(scrape_all())
     print(f"\n📊 Total scraped: {len(all_raw)} — AI matching...")
     send_telegram(f"📊 Scraped {len(all_raw)} jobs. Running AI match...")
 
-    all_apply = []
-    deduped   = set()
+    # Deduplicate before AI matching
+    unique_jobs = []
+    deduped = set()
     for job in all_raw:
         key = f"{job['title'].lower()}_{job['company'].lower()}"
-        if key in deduped or len(job['title']) < 8 or job['company'] == "Unknown":
-            continue
-        deduped.add(key)
+        if key not in deduped and len(job['title']) >= 8 and job['company'] != "Unknown":
+            deduped.add(key)
+            unique_jobs.append(job)
+
+    total_unique = len(unique_jobs)
+    report(f"🤖 AI matching {total_unique} unique jobs...", 72)
+
+    all_apply = []
+    for i, job in enumerate(unique_jobs):
+        # Progress from 72% → 90% across the AI matching loop
+        pct = 72 + int((i / max(total_unique, 1)) * 18)
+        if i % 5 == 0 or i == total_unique - 1:
+            report(f"🤖 AI matching job {i+1}/{total_unique}...", pct)
+
         if is_uae_national(job['title']):
             print(f"🚫 SKIP (UAE National) — {job['title']}")
             continue
@@ -357,9 +386,14 @@ def run():
             print(f"❌ SKIP ({score}%) — {job['title']} @ {job['company']}")
 
     all_apply.sort(key=lambda x: -x['score'])
+
+    report(f"💾 Saving {len(all_apply)} jobs to Google Sheets...", 91)
     save_to_sheets(all_apply)
+
+    report("📱 Sending Telegram notification...", 96)
     send_telegram_job_list(all_apply)
 
+    report(f"🎯 Done! {len(all_apply)} matching jobs saved", 100)
     print(f"\n🎯 DONE — {len(all_apply)} matching jobs saved")
     return len(all_apply)
 
