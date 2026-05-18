@@ -12,7 +12,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import os
 import json
 import requests
-from datetime import date
+from datetime import date, timedelta
 
 # ── CONFIG ────────────────────────────────────────────────
 TODAY            = date.today().strftime("%Y-%m-%d")
@@ -79,6 +79,31 @@ def extract_salary(text):
 def is_uae_national(title):
     return any(w in title.upper() for w in SKIP_KEYWORDS)
 
+def parse_posted_date(text):
+    """Convert '2 days ago', 'today', 'yesterday', ISO dates → YYYY-MM-DD."""
+    import re
+    if not text:
+        return TODAY
+    t = text.lower().strip()
+    today = date.today()
+    if any(w in t for w in ['today', 'just now', 'hour', 'minute', 'second', '< 1']):
+        return TODAY
+    if 'yesterday' in t:
+        return (today - timedelta(days=1)).strftime('%Y-%m-%d')
+    m = re.search(r'(\d+)\s*day', t)
+    if m:
+        return (today - timedelta(days=int(m.group(1)))).strftime('%Y-%m-%d')
+    m = re.search(r'(\d+)\s*week', t)
+    if m:
+        return (today - timedelta(weeks=int(m.group(1)))).strftime('%Y-%m-%d')
+    m = re.search(r'(\d+)\s*month', t)
+    if m:
+        return (today - timedelta(days=int(m.group(1)) * 30)).strftime('%Y-%m-%d')
+    m = re.search(r'(\d{4}-\d{2}-\d{2})', t)
+    if m:
+        return m.group(1)
+    return TODAY
+
 # ── GOOGLE SHEETS ─────────────────────────────────────────
 def get_creds():
     scope = ['https://spreadsheets.google.com/feeds',
@@ -115,7 +140,7 @@ def save_to_sheets(all_jobs):
         if not sheet.row_values(1):
             sheet.append_row(['Date','Score','Company','Job Title',
                               'Platform','Salary','Link','Status'])
-        rows = [[TODAY, f"{j['score']}%", j['company'], j['title'],
+        rows = [[j.get('posted_date', TODAY), f"{j['score']}%", j['company'], j['title'],
                  j['platform'], j.get('salary', 'TBD'), j['link'], 'New']
                 for j in all_jobs]
         sheet.append_rows(rows, value_input_option='USER_ENTERED')
@@ -238,10 +263,13 @@ async def scrape_bayt(client, seen_set, on_progress=None):
                     comp_el = parent.select_one('b, [class*="company"], [class*="jb-info"]') if parent else None
                     company = comp_el.get_text(strip=True) if comp_el else "Unknown"
                     link    = fix_link(a.get('href', '#'), 'https://www.bayt.com')
+                    date_el = parent.select_one('[class*="date"], time') if parent else None
+                    posted_date = parse_posted_date(date_el.get_text(strip=True) if date_el else '')
                     if len(title) >= 5:
                         key = f"{company.lower()}_{title.lower()}"
                         jobs.append({"title": title, "company": company, "link": link,
                                      "platform": "Bayt", "salary": "TBD",
+                                     "posted_date": posted_date,
                                      "seen_before": key in seen_set})
                 count = len(jobs) - sum(1 for j in jobs if j['platform'] != 'Bayt')
                 msg = f"🏢 Bayt: {label} → {count} jobs found"
@@ -270,9 +298,12 @@ async def scrape_bayt(client, seen_set, on_progress=None):
                     href    = title_el.get('href', '#')
                     link    = fix_link(href, 'https://www.bayt.com')
                     salary  = extract_salary(item.get_text())
+                    date_el = (item.select_one('[class*="date"]') or item.select_one('time'))
+                    posted_date = parse_posted_date(date_el.get_text(strip=True) if date_el else '')
                     key     = f"{company.lower()}_{title.lower()}"
                     jobs.append({"title": title, "company": company, "link": link,
                                  "platform": "Bayt", "salary": salary,
+                                 "posted_date": posted_date,
                                  "seen_before": key in seen_set})
                     count += 1
                 except Exception:
@@ -344,10 +375,14 @@ async def scrape_naukrigulf(client, seen_set, on_progress=None):
                     href    = title_el.get('href', '#')
                     link    = fix_link(href, 'https://www.naukrigulf.com')
                     salary  = extract_salary(item.get_text())
+                    date_el = (item.select_one('[class*="date"]') or item.select_one('time') or
+                               item.select_one('[class*="ago"]'))
+                    posted_date = parse_posted_date(date_el.get_text(strip=True) if date_el else '')
                     key     = f"{company.lower()}_{title.lower()}"
                     if company != "Unknown":
                         jobs.append({"title": title, "company": company, "link": link,
                                      "platform": "Naukrigulf", "salary": salary,
+                                     "posted_date": posted_date,
                                      "seen_before": key in seen_set})
                         count += 1
                 except Exception:
@@ -403,9 +438,13 @@ async def scrape_linkedin(client, seen_set, on_progress=None):
                     link    = fix_link(href, 'https://www.linkedin.com')
                     if len(title) < 5:
                         continue
+                    # LinkedIn provides exact ISO date in <time datetime="YYYY-MM-DD">
+                    time_el = item.select_one('time[datetime]')
+                    posted_date = time_el.get('datetime', TODAY)[:10] if time_el else TODAY
                     key = f"{company.lower()}_{title.lower()}"
                     jobs.append({"title": title, "company": company, "link": link,
                                  "platform": "LinkedIn", "salary": "TBD",
+                                 "posted_date": posted_date,
                                  "seen_before": key in seen_set})
                     count += 1
                 except Exception:
@@ -474,10 +513,13 @@ async def scrape_gulftalent(client, seen_set, on_progress=None):
                     href    = title_el.get('href', '#')
                     link    = fix_link(href, 'https://www.gulftalent.com')
                     salary  = extract_salary(item.get_text())
+                    date_el = (item.select_one('[class*="date"]') or item.select_one('time'))
+                    posted_date = parse_posted_date(date_el.get_text(strip=True) if date_el else '')
                     key     = f"{company.lower()}_{title.lower()}"
                     if len(title) > 5:
                         jobs.append({"title": title, "company": company, "link": link,
                                      "platform": "GulfTalent", "salary": salary,
+                                     "posted_date": posted_date,
                                      "seen_before": key in seen_set})
                         count += 1
                 except Exception:

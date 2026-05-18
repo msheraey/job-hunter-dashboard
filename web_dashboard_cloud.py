@@ -52,23 +52,68 @@ def get_config_sheet():
         return ws
 
 def load_jobs():
-    """Load jobs from Google Sheets"""
+    """Load jobs from Google Sheets.
+    Reads column positions by header name (case-insensitive) so mismatched
+    or reordered headers never cause bad link values in the dashboard."""
     try:
-        sheet = get_sheet()
-        records = sheet.get_all_records()
+        sheet    = get_sheet()
+        all_rows = sheet.get_all_values()
+        if len(all_rows) < 2:
+            return []
+
+        headers = [h.strip().lower() for h in all_rows[0]]
+
+        def find_col(*names):
+            for name in names:
+                try:
+                    return headers.index(name.lower())
+                except ValueError:
+                    pass
+            return None
+
+        c_date     = find_col('date')
+        c_score    = find_col('score')
+        c_company  = find_col('company')
+        c_title    = find_col('job title', 'title', 'jobtitle')
+        c_platform = find_col('platform')
+        c_salary   = find_col('salary')
+        c_link     = find_col('link', 'url', 'job url', 'job link')
+        c_status   = find_col('status')
+
+        def cell(row, idx, default=''):
+            if idx is None or idx >= len(row):
+                return default
+            return str(row[idx]).strip()
+
         jobs = []
-        for row in records:
-            if row.get('Job Title') and row.get('Company'):
-                jobs.append({
-                    'title': str(row.get('Job Title', ''))[:200],
-                    'company': str(row.get('Company', ''))[:100],
-                    'platform': str(row.get('Platform', 'Unknown')),
-                    'link': str(row.get('Link', '#')),
-                    'salary': str(row.get('Salary', 'TBD')),
-                    'score': int(str(row.get('Score', '0')).replace('%', '')) if row.get('Score') else 0,
-                    'date': str(row.get('Date', ''))[:10] if row.get('Date') else '',
-                    'status': str(row.get('Status', 'New'))
-                })
+        for row in all_rows[1:]:
+            title   = cell(row, c_title)
+            company = cell(row, c_company)
+            if not title or not company:
+                continue
+
+            link = cell(row, c_link, '#')
+            if not link.startswith('http'):   # reject emoji / empty / relative values
+                link = '#'
+
+            score_raw = cell(row, c_score, '0').replace('%', '').strip()
+            try:
+                score = int(score_raw)
+            except ValueError:
+                score = 0
+
+            raw_date = cell(row, c_date)
+            jobs.append({
+                'title':    title[:200],
+                'company':  company[:100],
+                'platform': cell(row, c_platform, 'Unknown'),
+                'link':     link,
+                'salary':   cell(row, c_salary, 'TBD'),
+                'score':    score,
+                'date':     raw_date[:10] if raw_date else '',
+                'status':   cell(row, c_status, 'New'),
+            })
+
         jobs.sort(key=lambda x: -x['score'])
         return jobs
     except Exception as e:
@@ -475,14 +520,124 @@ def dashboard():
     
     return render_template_string(HTML_TEMPLATE, jobs=jobs, stats=stats)
 
+MY_FULL_RESUME = """
+Mohammed Alsheraery | +971 55 717 7228 | m.sheraey@outlook.com
+linkedin.com/in/msheraey | Dubai/Sharjah, UAE | UAE Driving License | Own Vehicle
+
+EXPERIENCE:
+Retail Area Manager | 800 Pharmacy & Marina Pharmacy Group, Dubai (Mar 2025 – Present)
+• Managed 7 pharmacy branches across Dubai, Abu Dhabi, Sharjah
+• Achieved 94.6% of highest-ever regional sales target
+• Drove 19% YOY regional sales growth in 6 months
+• Standardised SOPs across all branches, reducing inefficiencies by 10%
+• Oversaw procurement, inventory, vendor coordination, call centre & delivery ops
+
+Branch Manager — A Class Branch | Life Pharmacy, Abu Dhabi (Jan 2022 – Mar 2025)
+• Achieved 56% YOY sales growth with full P&L ownership
+• Grew Google reviews to 1,200+ maintaining a 5-star rating
+• Managed premium FMCG/healthcare brands: Bioderma, Vichy, Pfizer, Bayer
+• Negotiated supplier terms, pricing and promotional budgets
+
+E-Commerce Manager & Store Manager | United Pharmacy Group, Dubai (Nov 2014 – Dec 2021)
+• Built e-commerce from zero across Amazon, Noon, Talabat, Instashop, Carrefour, Sharaf DG
+• Quadrupled online sales within 6 months of launch
+• Managed two branches simultaneously | Awarded Best Employee 2015
+
+EDUCATION: B.Pharm — Misr University, Cairo 2011 | DHA Licensed Pharmacist (Dubai)
+SKILLS: Multi-branch ops, P&L, procurement, supply chain, e-commerce, DHA/MOH/DOH compliance,
+        team leadership, KPI tracking, SOP development, inventory, vendor management, Power BI, Excel
+LANGUAGES: Arabic (Native) | English (Professional)
+"""
+
 @app.route('/generate-cv', methods=['POST'])
 def generate_cv():
+    import anthropic as ant
+    import httpx as hx
+    from bs4 import BeautifulSoup as BS
+
     data = request.json
-    job = data.get('job', {})
-    
-    # Here you would call your Telegram bot or CV builder
-    # For now, we'll just acknowledge
-    return jsonify({'success': True, 'message': 'CV generation started'})
+    job  = data.get('job', {})
+    if not job:
+        return jsonify({'success': False, 'error': 'No job data provided'})
+
+    api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+    if not api_key:
+        return jsonify({'success': False, 'error': 'ANTHROPIC_API_KEY not set on Render'})
+
+    def run_generation():
+        try:
+            # 1. Fetch the actual job page for better tailoring
+            job_desc = ""
+            job_link = job.get('link', '#')
+            if job_link and job_link.startswith('http'):
+                try:
+                    r = hx.get(job_link, headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                                      'AppleWebKit/537.36 Chrome/124.0',
+                        'Accept': 'text/html',
+                    }, timeout=15, follow_redirects=True, verify=False)
+                    soup = BS(r.text, 'lxml')
+                    for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
+                        tag.decompose()
+                    job_desc = soup.get_text(separator='\n', strip=True)[:3000]
+                except Exception as fe:
+                    print(f"CV: could not fetch job URL: {fe}")
+
+            # 2. Generate with Claude
+            ai  = ant.Anthropic(api_key=api_key)
+            msg = ai.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=1800,
+                messages=[{"role": "user", "content":
+                    f"You are a professional CV writer. Create tailored application materials.\n\n"
+                    f"JOB: {job.get('title','')} at {job.get('company','')}\n"
+                    f"SALARY: {job.get('salary','TBD')} | PLATFORM: {job.get('platform','')}\n"
+                    f"{('FULL JOB DESCRIPTION:\n' + job_desc + chr(10)) if job_desc else ''}\n"
+                    f"CANDIDATE RESUME:\n{MY_FULL_RESUME}\n\n"
+                    f"Provide EXACTLY these 3 sections:\n\n"
+                    f"🎯 TOP 3 SELLING POINTS\n"
+                    f"Why Mohammed is perfect for THIS role — cite his exact numbers.\n\n"
+                    f"📝 COVER LETTER\n"
+                    f"Dear Hiring Manager,\n"
+                    f"[4 paragraphs: excitement about this company/role, strongest matching "
+                    f"achievement with numbers, unique value he brings, confident close]\n\n"
+                    f"💡 CV TIPS FOR THIS ROLE\n"
+                    f"Which 3-4 achievements to lead with for this application.\n\n"
+                    f"Be specific — no generic phrases. Under 700 words total."}]
+            )
+            content = msg.content[0].text
+
+            # 3. Send to Telegram (split at 3800 chars to stay under 4096 limit)
+            header = (
+                f"📄 <b>CV &amp; Cover Letter</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📋 <b>{job.get('title','')}</b>\n"
+                f"🏢 <b>{job.get('company','')}</b>\n"
+                f"💰 {job.get('salary','TBD')} · {job.get('platform','')}\n"
+                f"🔗 <a href='{job.get('link','#')}'>View Job Posting</a>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            )
+            full_text = header + content
+            for i in range(0, len(full_text), 3800):
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                    json={"chat_id": TELEGRAM_CHAT_ID,
+                          "text": full_text[i:i + 3800],
+                          "parse_mode": "HTML",
+                          "disable_web_page_preview": True},
+                    timeout=30
+                )
+        except Exception as e:
+            print(f"CV generation error: {e}")
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": TELEGRAM_CHAT_ID,
+                      "text": f"❌ CV generation failed: {str(e)[:300]}"},
+                timeout=10
+            )
+
+    threading.Thread(target=run_generation, daemon=True).start()
+    return jsonify({'success': True})
 
 @app.route('/trigger-scraper', methods=['POST'])
 def trigger_scraper():
