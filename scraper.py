@@ -462,76 +462,98 @@ async def scrape_linkedin(client, seen_set, on_progress=None):
     return jobs
 
 
-async def scrape_gulftalent(client, seen_set, on_progress=None):
+async def scrape_indeed(client, seen_set, on_progress=None):
     """
-    GulfTalent.com — replaces Indeed (which blocks all scrapers).
-    GulfTalent is UAE-focused and does server-side rendering.
-    Last 3 days filter via &date_posted=3days where supported.
+    Indeed UAE — via RSS feed.
+    The HTML page is blocked by Cloudflare without a real browser, but the
+    RSS endpoint is a legitimate API that bypasses it completely.
     """
+    import xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
+
     jobs = []
     searches = [
-        ("area manager",       "area-manager"),
-        ("operations manager", "operations-manager"),
-        ("pharmacy manager",   "pharmacy-manager"),
-        ("cluster manager",    "cluster-manager"),
-        ("retail manager",     "retail-manager"),
+        ("area manager",       "area+manager"),
+        ("operations manager", "operations+manager"),
+        ("pharmacy manager",   "pharmacy+manager"),
+        ("cluster manager",    "cluster+manager"),
+        ("retail manager",     "retail+operations+manager"),
+        ("ecommerce manager",  "ecommerce+manager"),
     ]
     n = len(searches)
-    for i, (label, slug) in enumerate(searches):
+    for i, (label, query) in enumerate(searches):
         pct = 60 + int(((i + 1) / n) * 10)
         try:
-            url = f"https://www.gulftalent.com/uae/jobs/title-{slug}-1.html"
-            r   = await client.get(url, headers={
+            # fromage=3 = posted in last 3 days
+            url = (f"https://www.indeed.com/rss?q={query}"
+                   f"&l=United+Arab+Emirates&sort=date&fromage=3")
+            r = await client.get(url, headers={
                 **HEADERS,
-                'Referer': 'https://www.gulftalent.com/',
+                'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+                'Referer': 'https://www.indeed.com/',
             })
-            print(f"  GulfTalent [{label}] status={r.status_code} len={len(r.text)}")
-            soup = BeautifulSoup(r.text, 'lxml')
+            print(f"  Indeed RSS [{label}] status={r.status_code} len={len(r.text)}")
 
-            items = (soup.select('[class*="job_list_item"]')
-                     or soup.select('[class*="job-list-item"]')
-                     or soup.select('[class*="job_item"]')
-                     or soup.select('article')
-                     or soup.select('[class*="job-card"]'))
+            try:
+                root  = ET.fromstring(r.text)
+                items = root.findall('.//item')
+            except ET.ParseError:
+                items = []
 
             count = 0
             for item in items[:MAX_JOBS_PER_SEARCH]:
                 try:
-                    title_el = (item.select_one('h3 a')
-                                or item.select_one('h2 a')
-                                or item.select_one('[class*="title"] a')
-                                or item.select_one('a[href*="/jobs/"]'))
-                    if not title_el:
+                    raw_title = (item.findtext('title') or '').strip()
+                    link      = (item.findtext('link') or '#').strip()
+                    desc      = (item.findtext('description') or '').strip()
+                    pub_date  = (item.findtext('pubDate') or '').strip()
+
+                    # Indeed RSS title: "Job Title - Company (City, Country)"
+                    if ' - ' in raw_title:
+                        job_title, rest = raw_title.rsplit(' - ', 1)
+                        company = rest.split('(')[0].strip()  # strip location
+                    else:
+                        job_title = raw_title
+                        company   = "Unknown"
+
+                    job_title = job_title.strip()
+                    company   = company.strip() or "Unknown"
+                    if len(job_title) < 5:
                         continue
-                    title = title_el.get_text(strip=True)
-                    if len(title) < 5:
-                        continue
-                    comp_el = (item.select_one('[class*="company"]')
-                               or item.select_one('[class*="employer"]')
-                               or item.select_one('span.org'))
-                    company = comp_el.get_text(strip=True) if comp_el else "Unknown"
-                    href    = title_el.get('href', '#')
-                    link    = fix_link(href, 'https://www.gulftalent.com')
-                    salary  = extract_salary(item.get_text())
-                    date_el = (item.select_one('[class*="date"]') or item.select_one('time'))
-                    posted_date = parse_posted_date(date_el.get_text(strip=True) if date_el else '')
-                    key     = f"{company.lower()}_{title.lower()}"
-                    if len(title) > 5:
-                        jobs.append({"title": title, "company": company, "link": link,
-                                     "platform": "GulfTalent", "salary": salary,
-                                     "posted_date": posted_date,
-                                     "seen_before": key in seen_set})
-                        count += 1
+
+                    # Parse RFC 2822 date ("Mon, 15 May 2026 12:00:00 GMT")
+                    posted_date = TODAY
+                    if pub_date:
+                        try:
+                            posted_date = parsedate_to_datetime(pub_date).strftime('%Y-%m-%d')
+                        except Exception:
+                            posted_date = parse_posted_date(pub_date)
+
+                    if not link.startswith('http'):
+                        link = '#'
+
+                    salary = extract_salary(desc)
+                    key    = f"{company.lower()}_{job_title.lower()}"
+                    jobs.append({
+                        "title":       job_title,
+                        "company":     company,
+                        "link":        link,
+                        "platform":    "Indeed",
+                        "salary":      salary,
+                        "posted_date": posted_date,
+                        "seen_before": key in seen_set,
+                    })
+                    count += 1
                 except Exception:
                     continue
 
-            msg = f"🌍 GulfTalent: {label} → {count} jobs found"
+            msg = f"🔍 Indeed: {label} → {count} jobs found"
             if on_progress:
                 on_progress(msg, pct)
             print(f"  {msg}")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.5)
         except Exception as e:
-            msg = f"🌍 GulfTalent: {label} → error: {str(e)[:60]}"
+            msg = f"🔍 Indeed: {label} → error: {str(e)[:60]}"
             if on_progress:
                 on_progress(msg, pct)
             print(f"  {msg}")
@@ -559,7 +581,7 @@ def run(progress_callback=None):
 
     report("🚀 Starting Job Hunter...", 2)
     send_telegram(f"🚀 Job Hunter started — {TODAY}\n"
-                  f"Scanning Bayt, Naukrigulf, LinkedIn, GulfTalent...")
+                  f"Scanning Bayt, Naukrigulf, LinkedIn, Indeed...")
     print(f"\n{'='*50}\n🚀 Job Hunter Cloud — {TODAY}\n{'='*50}")
 
     report("📂 Loading previous jobs from Sheets...", 5)
@@ -580,10 +602,10 @@ def run(progress_callback=None):
             report("💼 Searching LinkedIn...", 44)
             li_jobs = await scrape_linkedin(client, seen_set, on_progress=report)
 
-            report("🌍 Searching GulfTalent...", 60)
-            gt_jobs = await scrape_gulftalent(client, seen_set, on_progress=report)
+            report("🔍 Searching Indeed (RSS)...", 60)
+            indeed_jobs = await scrape_indeed(client, seen_set, on_progress=report)
 
-            all_jobs = bayt_jobs + ng_jobs + li_jobs + gt_jobs
+            all_jobs = bayt_jobs + ng_jobs + li_jobs + indeed_jobs
             report(f"✅ All platforms done — {len(all_jobs)} raw jobs collected", 70)
             return all_jobs
 
