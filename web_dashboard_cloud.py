@@ -250,6 +250,7 @@ HTML_TEMPLATE = """
                         <th>Job Title</th>
                         <th>Company</th>
                         <th>Platform</th>
+                        <th>Date Found</th>
                         <th>Status</th>
                         <th>Actions</th>
                     </tr>
@@ -262,6 +263,7 @@ HTML_TEMPLATE = """
                         <td><a href="{{ job.link }}" target="_blank" style="color: #667eea; text-decoration: none;">{{ job.title[:60] }}{% if job.title|length > 60 %}...{% endif %}</a></td>
                         <td>{{ job.company[:40] }}</td>
                         <td>{{ job.platform }}</td>
+                        <td style="color:#888; font-size:13px; white-space:nowrap;">{{ job.date if job.date else '—' }}</td>
                         <td><span class="status-badge status-{{ job.status.lower() }}">{{ job.status }}</span></td>
                         <td>
                             <button class="btn btn-primary" onclick="viewJob('{{ job.link }}')">View</button>
