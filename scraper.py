@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Job Hunter Scraper — Cloud Version (httpx + BeautifulSoup, no browser)
-Works on any Python version, no Playwright/greenlet needed.
 """
 
 import asyncio
@@ -16,12 +15,12 @@ import requests
 from datetime import date
 
 # ── CONFIG ────────────────────────────────────────────────
-TODAY          = date.today().strftime("%Y-%m-%d")
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '8972917892:AAGs_Z6xWc67poi7EfVdJpPoJJb_3hs8sJo')
+TODAY            = date.today().strftime("%Y-%m-%d")
+TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN', '8972917892:AAGs_Z6xWc67poi7EfVdJpPoJJb_3hs8sJo')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '8872960522')
-SHEET_ID       = os.environ.get('SHEET_ID', '')
-SHEET_NAME     = "Sheet1"
-ANTHROPIC_KEY  = os.environ.get('ANTHROPIC_API_KEY', '')
+SHEET_ID         = os.environ.get('SHEET_ID', '')
+SHEET_NAME       = "Sheet1"
+ANTHROPIC_KEY    = os.environ.get('ANTHROPIC_API_KEY', '')
 
 SKIP_KEYWORDS = ['UAEN', 'UAE NATIONAL', 'EMIRATI', 'NATIONAL ONLY', 'NATIONALS ONLY']
 
@@ -38,19 +37,26 @@ Achievements: 56% YOY sales growth, 19% regional uplift in 6 months,
 managed 7+ branches simultaneously, 1200+ Google reviews at 5 stars
 """
 
+# Realistic browser headers to avoid bot detection
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                   '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
     'Accept-Encoding': 'gzip, deflate, br',
-    'Cache-Control': 'no-cache',
-    'Pragma': 'no-cache',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
 }
+
+# Jobs per search term (raise this to get more results)
+MAX_JOBS_PER_SEARCH = 20
 
 # ── HELPERS ───────────────────────────────────────────────
 def fix_link(href, base):
-    """Always return a valid absolute URL."""
+    """Return a valid absolute URL regardless of what format href is in."""
     if not href or href.strip() in ('#', '', 'javascript:void(0)'):
         return '#'
     href = href.strip()
@@ -101,6 +107,7 @@ def load_seen_before():
 
 def save_to_sheets(all_jobs):
     if not SHEET_ID or not all_jobs:
+        print("save_to_sheets: nothing to save")
         return
     try:
         client = gspread.authorize(get_creds())
@@ -181,58 +188,89 @@ def match_job(title, company, salary=""):
         return 0, False
 
 # ── SCRAPERS ─────────────────────────────────────────────
+
 async def scrape_bayt(client, seen_set, on_progress=None):
-    """Scrape Bayt.com UAE job listings."""
+    """
+    Bayt.com — uses their SEARCH URL (?q=...) which is server-side rendered.
+    The old category URLs (/area-manager-jobs/) are JS-rendered → always 0.
+    """
     jobs = []
     searches = [
-        ("area manager",       "area-manager-jobs"),
-        ("operations manager", "operations-manager-jobs"),
-        ("pharmacy manager",   "pharmacy-manager-jobs"),
-        ("ecommerce manager",  "e-commerce-manager-jobs"),
-        ("cluster manager",    "cluster-manager-jobs"),
-        ("regional manager",   "regional-manager-jobs"),
-        ("retail manager",     "retail-manager-jobs"),
+        "area manager",
+        "operations manager",
+        "pharmacy manager",
+        "ecommerce manager",
+        "cluster manager",
+        "regional manager",
+        "retail manager",
     ]
     n = len(searches)
-    for i, (label, slug) in enumerate(searches):
+    for i, label in enumerate(searches):
         pct = 10 + int(((i + 1) / n) * 17)
         try:
-            url = f"https://www.bayt.com/en/uae/jobs/{slug}/"
-            r   = await client.get(url, headers={**HEADERS, 'Referer': 'https://www.bayt.com/'})
+            q   = label.replace(' ', '+')
+            url = f"https://www.bayt.com/en/uae/jobs/?q={q}"
+            r   = await client.get(url, headers={
+                **HEADERS,
+                'Referer': 'https://www.bayt.com/en/uae/jobs/',
+            })
+            print(f"  Bayt [{label}] status={r.status_code} len={len(r.text)}")
             soup = BeautifulSoup(r.text, 'lxml')
 
-            # Try every known Bayt list-item selector
-            items = (soup.select('li[data-job-id]')
-                     or soup.select('li[class*="has-pointer-d"]')
-                     or soup.select('li.media.list-item')
-                     or soup.select('.jobs-list li')
-                     or soup.select('li.t-row'))
+            # Strategy 1: data-job-id li elements
+            items = soup.select('li[data-job-id]')
+            # Strategy 2: has-pointer class
+            if not items:
+                items = soup.select('li[class*="has-pointer"]')
+            # Strategy 3: any li with an h2 link
+            if not items:
+                items = [li for li in soup.select('li')
+                         if li.select_one('h2 a[href*="/jobs/"]')]
+            # Strategy 4: generic job-link extraction
+            if not items:
+                raw_links = soup.select('a[href*="/en/uae/jobs/"]')
+                job_links = [a for a in raw_links
+                             if a.get('href', '').count('/') >= 6
+                             and a.get_text(strip=True)]
+                for a in job_links[:MAX_JOBS_PER_SEARCH]:
+                    title   = a.get_text(strip=True)
+                    parent  = a.find_parent('li') or a.find_parent('div')
+                    comp_el = parent.select_one('b, [class*="company"], [class*="jb-info"]') if parent else None
+                    company = comp_el.get_text(strip=True) if comp_el else "Unknown"
+                    link    = fix_link(a.get('href', '#'), 'https://www.bayt.com')
+                    if len(title) >= 5:
+                        key = f"{company.lower()}_{title.lower()}"
+                        jobs.append({"title": title, "company": company, "link": link,
+                                     "platform": "Bayt", "salary": "TBD",
+                                     "seen_before": key in seen_set})
+                count = len(jobs) - sum(1 for j in jobs if j['platform'] != 'Bayt')
+                msg = f"🏢 Bayt: {label} → {count} jobs found"
+                if on_progress:
+                    on_progress(msg, pct)
+                print(f"  {msg}")
+                await asyncio.sleep(2)
+                continue
 
             count = 0
-            for item in items[:15]:
+            for item in items[:MAX_JOBS_PER_SEARCH]:
                 try:
-                    # Title selectors — ordered most → least specific
-                    title_el = (item.select_one('h2.t-size-xl a')
-                                or item.select_one('h2 a')
-                                or item.select_one('[class*="jb-title"] a')
-                                or item.select_one('a[href*="/en/uae/jobs/"]'))
+                    title_el = (item.select_one('h2 a')
+                                or item.select_one('[class*="title"] a')
+                                or item.select_one('a[href*="/jobs/"]'))
                     if not title_el:
                         continue
                     title = title_el.get_text(strip=True)
                     if len(title) < 5:
                         continue
-
-                    # Company selectors
-                    company_el = (item.select_one('[class*="jb-company"]')
-                                  or item.select_one('[class*="jb-attrs"] a')
-                                  or item.select_one('b[class*="t-default"]')
-                                  or item.select_one('.t-muted-l'))
-                    company = company_el.get_text(strip=True) if company_el else "Unknown"
-
-                    href = title_el.get('href', '#')
-                    link = fix_link(href, 'https://www.bayt.com')
-                    salary = extract_salary(item.get_text())
-                    key    = f"{company.lower()}_{title.lower()}"
+                    comp_el = (item.select_one('[class*="jb-company"]')
+                               or item.select_one('b[class*="t-"]')
+                               or item.select_one('[class*="jb-attrs"] a')
+                               or item.select_one('b'))
+                    company = comp_el.get_text(strip=True) if comp_el else "Unknown"
+                    href    = title_el.get('href', '#')
+                    link    = fix_link(href, 'https://www.bayt.com')
+                    salary  = extract_salary(item.get_text())
+                    key     = f"{company.lower()}_{title.lower()}"
                     jobs.append({"title": title, "company": company, "link": link,
                                  "platform": "Bayt", "salary": salary,
                                  "seen_before": key in seen_set})
@@ -244,9 +282,9 @@ async def scrape_bayt(client, seen_set, on_progress=None):
             if on_progress:
                 on_progress(msg, pct)
             print(f"  {msg}")
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2)
         except Exception as e:
-            msg = f"🏢 Bayt: {label} → error ({str(e)[:40]})"
+            msg = f"🏢 Bayt: {label} → error: {str(e)[:60]}"
             if on_progress:
                 on_progress(msg, pct)
             print(f"  {msg}")
@@ -254,33 +292,41 @@ async def scrape_bayt(client, seen_set, on_progress=None):
 
 
 async def scrape_naukrigulf(client, seen_set, on_progress=None):
-    """Scrape Naukrigulf UAE job listings."""
+    """
+    Naukrigulf — uses their search URL (?q=...&location=uae).
+    The old slug-based URLs were returning errors.
+    """
     jobs = []
     searches = [
-        ("area manager",       "area-manager-jobs-in-uae"),
-        ("operations manager", "operations-manager-jobs-in-uae"),
-        ("pharmacy manager",   "pharmacy-manager-jobs-in-uae"),
-        ("ecommerce manager",  "ecommerce-manager-jobs-in-uae"),
-        ("cluster manager",    "cluster-manager-jobs-in-uae"),
-        ("regional manager",   "regional-manager-jobs-in-uae"),
-        ("retail manager",     "retail-manager-jobs-in-uae"),
+        "area manager",
+        "operations manager",
+        "pharmacy manager",
+        "ecommerce manager",
+        "cluster manager",
+        "regional manager",
+        "retail manager",
     ]
     n = len(searches)
-    for i, (label, slug) in enumerate(searches):
+    for i, label in enumerate(searches):
         pct = 27 + int(((i + 1) / n) * 17)
         try:
-            url  = f"https://www.naukrigulf.com/{slug}"
-            r    = await client.get(url)
+            q   = label.replace(' ', '+')
+            url = f"https://www.naukrigulf.com/jobs?q={q}&location=uae&searchType=1"
+            r   = await client.get(url, headers={
+                **HEADERS,
+                'Referer': 'https://www.naukrigulf.com/',
+            })
+            print(f"  Naukrigulf [{label}] status={r.status_code} len={len(r.text)}")
             soup = BeautifulSoup(r.text, 'lxml')
 
             items = (soup.select('[class*="tuple-card"]')
                      or soup.select('[class*="job-tuple"]')
-                     or soup.select('[class*="job-listing"]')
+                     or soup.select('[class*="srp-tuple"]')
                      or soup.select('article')
                      or soup.select('[class*="tuple"]'))
 
             count = 0
-            for item in items[:15]:
+            for item in items[:MAX_JOBS_PER_SEARCH]:
                 try:
                     title_el = (item.select_one('a[class*="title"]')
                                 or item.select_one('h3 a')
@@ -291,11 +337,10 @@ async def scrape_naukrigulf(client, seen_set, on_progress=None):
                     title = title_el.get_text(strip=True)
                     if len(title) < 5:
                         continue
-                    company_el = (item.select_one('[class*="company-name"]')
-                                  or item.select_one('[class*="org"]')
-                                  or item.select_one('.comp-name')
-                                  or item.select_one('[class*="employer"]'))
-                    company = company_el.get_text(strip=True) if company_el else "Unknown"
+                    comp_el = (item.select_one('[class*="company-name"]')
+                               or item.select_one('[class*="comp-name"]')
+                               or item.select_one('[class*="org"]'))
+                    company = comp_el.get_text(strip=True) if comp_el else "Unknown"
                     href    = title_el.get('href', '#')
                     link    = fix_link(href, 'https://www.naukrigulf.com')
                     salary  = extract_salary(item.get_text())
@@ -312,9 +357,9 @@ async def scrape_naukrigulf(client, seen_set, on_progress=None):
             if on_progress:
                 on_progress(msg, pct)
             print(f"  {msg}")
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2)
         except Exception as e:
-            msg = f"🔎 Naukrigulf: {label} → error ({str(e)[:40]})"
+            msg = f"🔎 Naukrigulf: {label} → error: {str(e)[:60]}"
             if on_progress:
                 on_progress(msg, pct)
             print(f"  {msg}")
@@ -322,7 +367,7 @@ async def scrape_naukrigulf(client, seen_set, on_progress=None):
 
 
 async def scrape_linkedin(client, seen_set, on_progress=None):
-    """Scrape LinkedIn UAE jobs via the guest API."""
+    """LinkedIn guest jobs API — last 3 days."""
     jobs = []
     searches = [
         ("area manager",       "area+manager"),
@@ -337,13 +382,15 @@ async def scrape_linkedin(client, seen_set, on_progress=None):
     for i, (label, query) in enumerate(searches):
         pct = 44 + int(((i + 1) / n) * 16)
         try:
+            # f_TPR=r259200 = last 3 days (3 × 24 × 3600 = 259200 seconds)
             url = (f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
-                   f"?keywords={query}&location=United+Arab+Emirates&f_TPR=r86400&start=0")
+                   f"?keywords={query}&location=United+Arab+Emirates"
+                   f"&f_TPR=r259200&start=0")
             r    = await client.get(url)
             soup = BeautifulSoup(r.text, 'lxml')
             items = soup.select('li')
             count = 0
-            for item in items[:15]:
+            for item in items[:MAX_JOBS_PER_SEARCH]:
                 try:
                     title_el   = item.select_one('.base-search-card__title, h3')
                     company_el = item.select_one('.base-search-card__subtitle, h4')
@@ -363,67 +410,86 @@ async def scrape_linkedin(client, seen_set, on_progress=None):
                     count += 1
                 except Exception:
                     continue
-
             msg = f"💼 LinkedIn: {label} → {count} jobs found"
             if on_progress:
                 on_progress(msg, pct)
             print(f"  {msg}")
             await asyncio.sleep(1.5)
         except Exception as e:
-            msg = f"💼 LinkedIn: {label} → error ({str(e)[:40]})"
+            msg = f"💼 LinkedIn: {label} → error: {str(e)[:60]}"
             if on_progress:
                 on_progress(msg, pct)
             print(f"  {msg}")
     return jobs
 
 
-async def scrape_indeed(client, seen_set, on_progress=None):
-    """Scrape Indeed UAE job listings."""
+async def scrape_gulftalent(client, seen_set, on_progress=None):
+    """
+    GulfTalent.com — replaces Indeed (which blocks all scrapers).
+    GulfTalent is UAE-focused and does server-side rendering.
+    Last 3 days filter via &date_posted=3days where supported.
+    """
     jobs = []
     searches = [
-        ("area manager",       "area+manager"),
-        ("operations manager", "operations+manager"),
-        ("pharmacy manager",   "pharmacy+manager"),
-        ("cluster manager",    "cluster+manager"),
-        ("retail manager",     "retail+operations+manager"),
+        ("area manager",       "area-manager"),
+        ("operations manager", "operations-manager"),
+        ("pharmacy manager",   "pharmacy-manager"),
+        ("cluster manager",    "cluster-manager"),
+        ("retail manager",     "retail-manager"),
     ]
     n = len(searches)
-    for i, (label, query) in enumerate(searches):
+    for i, (label, slug) in enumerate(searches):
         pct = 60 + int(((i + 1) / n) * 10)
         try:
-            url  = f"https://ae.indeed.com/jobs?q={query}&l=UAE&fromage=1"
-            r    = await client.get(url)
+            url = f"https://www.gulftalent.com/uae/jobs/title-{slug}-1.html"
+            r   = await client.get(url, headers={
+                **HEADERS,
+                'Referer': 'https://www.gulftalent.com/',
+            })
+            print(f"  GulfTalent [{label}] status={r.status_code} len={len(r.text)}")
             soup = BeautifulSoup(r.text, 'lxml')
-            items = soup.select('.job_seen_beacon, [class*="jobCard"], .resultContent')
+
+            items = (soup.select('[class*="job_list_item"]')
+                     or soup.select('[class*="job-list-item"]')
+                     or soup.select('[class*="job_item"]')
+                     or soup.select('article')
+                     or soup.select('[class*="job-card"]'))
+
             count = 0
-            for item in items[:15]:
+            for item in items[:MAX_JOBS_PER_SEARCH]:
                 try:
-                    title_el   = item.select_one('h2 a, h2 span[title]')
-                    company_el = item.select_one('[data-testid="company-name"], .companyName')
+                    title_el = (item.select_one('h3 a')
+                                or item.select_one('h2 a')
+                                or item.select_one('[class*="title"] a')
+                                or item.select_one('a[href*="/jobs/"]'))
                     if not title_el:
                         continue
-                    title   = title_el.get_text(strip=True)
-                    company = company_el.get_text(strip=True) if company_el else "Unknown"
-                    a_tag   = item.select_one('h2 a')
-                    href    = a_tag.get('href', '#') if a_tag else '#'
-                    link    = fix_link(href, 'https://ae.indeed.com')
+                    title = title_el.get_text(strip=True)
+                    if len(title) < 5:
+                        continue
+                    comp_el = (item.select_one('[class*="company"]')
+                               or item.select_one('[class*="employer"]')
+                               or item.select_one('span.org'))
+                    company = comp_el.get_text(strip=True) if comp_el else "Unknown"
+                    href    = title_el.get('href', '#')
+                    link    = fix_link(href, 'https://www.gulftalent.com')
                     salary  = extract_salary(item.get_text())
                     key     = f"{company.lower()}_{title.lower()}"
-                    if len(title) > 5 and company != "Unknown":
+                    if len(title) > 5:
                         jobs.append({"title": title, "company": company, "link": link,
-                                     "platform": "Indeed", "salary": salary,
+                                     "platform": "GulfTalent", "salary": salary,
                                      "seen_before": key in seen_set})
                         count += 1
                 except Exception:
                     continue
 
-            msg = f"🔍 Indeed: {label} → {count} jobs found"
+            msg = f"🌍 GulfTalent: {label} → {count} jobs found"
             if on_progress:
                 on_progress(msg, pct)
             print(f"  {msg}")
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2)
         except Exception as e:
-            msg = f"🔍 Indeed: {label} → error ({str(e)[:40]})"
+            msg = f"🌍 GulfTalent: {label} → error: {str(e)[:60]}"
             if on_progress:
                 on_progress(msg, pct)
             print(f"  {msg}")
@@ -433,8 +499,7 @@ async def scrape_indeed(client, seen_set, on_progress=None):
 # ── MAIN ──────────────────────────────────────────────────
 def run(progress_callback=None):
     """Run full scrape + AI match pipeline.
-    progress_callback(step: str, pct: int) is called throughout
-    so the web dashboard can show a live progress bar.
+    progress_callback(step: str, pct: int) is called throughout.
     """
     def report(step, pct):
         print(f"[{pct:3d}%] {step}")
@@ -452,7 +517,7 @@ def run(progress_callback=None):
 
     report("🚀 Starting Job Hunter...", 2)
     send_telegram(f"🚀 Job Hunter started — {TODAY}\n"
-                  f"Scanning Bayt, Naukrigulf, LinkedIn, Indeed...")
+                  f"Scanning Bayt, Naukrigulf, LinkedIn, GulfTalent...")
     print(f"\n{'='*50}\n🚀 Job Hunter Cloud — {TODAY}\n{'='*50}")
 
     report("📂 Loading previous jobs from Sheets...", 5)
@@ -460,25 +525,23 @@ def run(progress_callback=None):
     print(f"📂 {len(seen_set)} previously seen jobs loaded")
 
     async def scrape_all():
-        async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True,
-                                     timeout=30.0, verify=False) as client:
-            # Bayt: 10% → 27%
+        async with httpx.AsyncClient(
+                headers=HEADERS, follow_redirects=True,
+                timeout=30.0, verify=False) as client:
+
             report("🏢 Searching Bayt...", 10)
             bayt_jobs = await scrape_bayt(client, seen_set, on_progress=report)
 
-            # Naukrigulf: 27% → 44%
             report("🔎 Searching Naukrigulf...", 27)
             ng_jobs = await scrape_naukrigulf(client, seen_set, on_progress=report)
 
-            # LinkedIn: 44% → 60%
             report("💼 Searching LinkedIn...", 44)
             li_jobs = await scrape_linkedin(client, seen_set, on_progress=report)
 
-            # Indeed: 60% → 70%
-            report("🔍 Searching Indeed...", 60)
-            indeed_jobs = await scrape_indeed(client, seen_set, on_progress=report)
+            report("🌍 Searching GulfTalent...", 60)
+            gt_jobs = await scrape_gulftalent(client, seen_set, on_progress=report)
 
-            all_jobs = bayt_jobs + ng_jobs + li_jobs + indeed_jobs
+            all_jobs = bayt_jobs + ng_jobs + li_jobs + gt_jobs
             report(f"✅ All platforms done — {len(all_jobs)} raw jobs collected", 70)
             return all_jobs
 
@@ -487,7 +550,7 @@ def run(progress_callback=None):
 
     total_raw = len(all_raw)
     print(f"\n📊 Total scraped: {total_raw} — deduplicating + AI matching...")
-    send_telegram(f"📊 Scraped {total_raw} jobs. Running AI match...")
+    send_telegram(f"📊 Scraped {total_raw} jobs across 4 platforms. Running AI match...")
 
     # Deduplicate before AI calls
     unique_jobs = []
@@ -505,14 +568,13 @@ def run(progress_callback=None):
 
     all_apply = []
     for i, job in enumerate(unique_jobs):
-        # Progress slides from 72% → 90% across the AI loop
         pct = 72 + int((i / max(total_unique, 1)) * 18)
         if i % 5 == 0 or i == total_unique - 1:
             short_title = job['title'][:35] + ('…' if len(job['title']) > 35 else '')
             report(f"🤖 AI matching {i+1}/{total_unique}: {short_title}", pct)
 
         if is_uae_national(job['title']):
-            print(f"🚫 SKIP (UAE National) — {job['title']}")
+            print(f"  🚫 SKIP (UAE National) — {job['title']}")
             continue
 
         score, apply = match_job(job['title'], job['company'], job.get('salary', ''))
