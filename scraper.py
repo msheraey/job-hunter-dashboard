@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Job Hunter Scraper — Cloud Version
-Runs on Render with headless Playwright + Google Sheets
+Job Hunter Scraper — Cloud Version (httpx + BeautifulSoup, no browser)
+Works on any Python version, no Playwright/greenlet needed.
 """
 
-from playwright.async_api import async_playwright
 import asyncio
+import httpx
+from bs4 import BeautifulSoup
 import anthropic
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -16,12 +17,12 @@ import time
 from datetime import date
 
 # ── CONFIG ────────────────────────────────────────────────
-TODAY = date.today().strftime("%Y-%m-%d")
+TODAY          = date.today().strftime("%Y-%m-%d")
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '8972917892:AAGs_Z6xWc67poi7EfVdJpPoJJb_3hs8sJo')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '8872960522')
-SHEET_ID = os.environ.get('SHEET_ID', '')
-SHEET_NAME = "Sheet1"
-ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+SHEET_ID       = os.environ.get('SHEET_ID', '')
+SHEET_NAME     = "Sheet1"
+ANTHROPIC_KEY  = os.environ.get('ANTHROPIC_API_KEY', '')
 
 SKIP_KEYWORDS = ['UAEN', 'UAE NATIONAL', 'EMIRATI', 'NATIONAL ONLY', 'NATIONALS ONLY']
 
@@ -38,6 +39,13 @@ Achievements: 56% YOY sales growth, 19% regional uplift in 6 months,
 managed 7+ branches simultaneously, 1200+ Google reviews at 5 stars
 """
 
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+}
+
 # ── GOOGLE SHEETS ─────────────────────────────────────────
 def get_creds():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -47,421 +55,312 @@ def get_creds():
     return ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
 
 def load_seen_before():
-    """Load previously scraped company+title pairs from Google Sheets"""
     seen = set()
     if not SHEET_ID:
         return seen
     try:
         client = gspread.authorize(get_creds())
         sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
-        records = sheet.get_all_records()
-        for row in records:
+        for row in sheet.get_all_records():
             company = str(row.get('Company', '')).lower().strip()
-            title = str(row.get('Job Title', '')).lower().strip()
+            title   = str(row.get('Job Title', '')).lower().strip()
             if company and title:
                 seen.add(f"{company}_{title}")
     except Exception as e:
         print(f"load_seen_before error: {e}")
     return seen
 
-def ensure_headers(sheet):
-    """Make sure the sheet has correct headers"""
-    try:
-        first_row = sheet.row_values(1)
-        expected = ['Date', 'Score', 'Company', 'Job Title', 'Platform', 'Salary', 'Link', 'Status']
-        if first_row != expected:
-            sheet.insert_row(expected, 1)
-    except Exception as e:
-        print(f"ensure_headers error: {e}")
-
 def save_to_sheets(all_jobs):
-    """Save scraped jobs to Google Sheets"""
     if not SHEET_ID or not all_jobs:
         return
     try:
         client = gspread.authorize(get_creds())
         sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
-        ensure_headers(sheet)
-
-        rows = []
-        for job in all_jobs:
-            rows.append([
-                TODAY,
-                f"{job['score']}%",
-                job['company'],
-                job['title'],
-                job['platform'],
-                job.get('salary', 'TBD'),
-                job['link'],
-                'New'
-            ])
-
-        if rows:
-            sheet.append_rows(rows, value_input_option='USER_ENTERED')
-            new = len([j for j in all_jobs if not j.get('seen_before')])
-            seen = len([j for j in all_jobs if j.get('seen_before')])
-            print(f"✅ Saved {len(rows)} jobs to Google Sheets ({new} new, {seen} seen before)")
+        # Ensure headers exist
+        if not sheet.row_values(1):
+            sheet.append_row(['Date','Score','Company','Job Title','Platform','Salary','Link','Status'])
+        rows = [[TODAY, f"{j['score']}%", j['company'], j['title'],
+                 j['platform'], j.get('salary','TBD'), j['link'], 'New']
+                for j in all_jobs]
+        sheet.append_rows(rows, value_input_option='USER_ENTERED')
+        print(f"✅ Saved {len(rows)} jobs to Google Sheets")
     except Exception as e:
         print(f"save_to_sheets error: {e}")
 
 # ── TELEGRAM ──────────────────────────────────────────────
 def send_telegram(message):
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        }, timeout=10)
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": message,
+                  "parse_mode": "HTML", "disable_web_page_preview": True}, timeout=10)
     except Exception as e:
         print(f"Telegram error: {e}")
 
 def send_telegram_job_list(all_jobs):
     new_jobs  = [j for j in all_jobs if not j.get('seen_before')]
     seen_jobs = [j for j in all_jobs if j.get('seen_before')]
-
     if not all_jobs:
         send_telegram(f"🔍 Job Hunter ran on {TODAY}\n\n❌ No matching jobs found today.")
         return
-
     send_telegram(
         f"🎯 <b>JOB HUNTER — {TODAY}</b>\n"
-        f"🆕 New: <b>{len(new_jobs)}</b> | 👀 Seen Before: <b>{len(seen_jobs)}</b>\n"
+        f"🆕 New: <b>{len(new_jobs)}</b> | 👀 Seen: <b>{len(seen_jobs)}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📝 Reply with job number to generate CV\nExample: <code>cv 3</code>"
+        f"Reply <code>cv [number]</code> to generate CV"
     )
-
     def send_batch(jobs, label):
         if not jobs:
             return
         send_telegram(f"<b>{label}</b>")
         batch = []
         for i, job in enumerate(jobs, 1):
-            score = job['score']
-            emoji = "🔥" if score >= 80 else "⭐" if score >= 70 else "✅"
-            batch.append(
-                f"{emoji} <b>#{i} — {score}%</b>\n"
-                f"📋 {job['title']}\n"
-                f"🏢 {job['company']}\n"
-                f"💰 {job.get('salary', 'TBD')}\n"
-                f"📱 {job['platform']}\n"
-                f"🔗 <a href='{job['link']}'>Apply Now</a>"
-            )
+            e = "🔥" if job['score'] >= 80 else "⭐" if job['score'] >= 70 else "✅"
+            batch.append(f"{e} <b>#{i} — {job['score']}%</b>\n📋 {job['title']}\n🏢 {job['company']}\n💰 {job.get('salary','TBD')}\n📱 {job['platform']}\n🔗 <a href='{job['link']}'>Apply</a>")
             if len(batch) == 5 or i == len(jobs):
                 send_telegram("\n━━━━━━━━━━━━\n".join(batch))
                 batch = []
-
     send_batch(new_jobs, "🆕 NEW JOBS:")
-    send_batch(seen_jobs, "👀 SEEN BEFORE (still open):")
-    send_telegram(
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📄 Reply <code>cv [number]</code> to generate CV\n"
-        f"🌐 Dashboard: https://job-hunter-dashboard-75ex.onrender.com"
-    )
+    send_batch(seen_jobs, "👀 SEEN BEFORE:")
+    send_telegram(f"🌐 Dashboard: https://job-hunter-dashboard-75ex.onrender.com")
 
 # ── AI MATCHING ───────────────────────────────────────────
 def match_job(title, company, salary=""):
     if not ANTHROPIC_KEY:
-        return 70, True   # fallback if no API key
+        return 70, True
     try:
         ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         msg = ai.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=100,
+            model="claude-haiku-4-5", max_tokens=100,
             messages=[{"role": "user", "content":
-                f"Score this job 0-100 for this resume. Reply ONLY:\nSCORE: [number]\nAPPLY: [YES or NO]\n\nRESUME: {MY_RESUME}\nJOB: {title} at {company}\nSALARY: {salary or 'Not listed'}"}]
-        )
+                f"Score 0-100 for resume match. Reply ONLY:\nSCORE: [number]\nAPPLY: [YES or NO]\n\nRESUME: {MY_RESUME}\nJOB: {title} at {company}\nSALARY: {salary or 'Not listed'}"}])
         result = msg.content[0].text
-        score_line = [l for l in result.split('\n') if 'SCORE:' in l][0]
-        score = int(score_line.split(':')[1].strip().split('/')[0])
-        apply = 'YES' in result
-        return score, apply
+        score = int([l for l in result.split('\n') if 'SCORE:' in l][0].split(':')[1].strip())
+        return score, 'YES' in result
     except:
         return 0, False
 
 def extract_salary(text):
     import re
-    for pattern in [
-        r'AED[\s]?[\d,]+[\s]?[-–][\s]?[\d,]+',
-        r'[\d,]+[\s]?[-–][\s]?[\d,]+[\s]?AED',
-        r'AED[\s]?[\d,]+',
-    ]:
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            return m.group(0).strip()
+    for p in [r'AED[\s]?[\d,]+[\s]?[-–][\s]?[\d,]+', r'[\d,]+[\s]?[-–][\s]?[\d,]+[\s]?AED', r'AED[\s]?[\d,]+']:
+        m = re.search(p, text, re.IGNORECASE)
+        if m: return m.group(0).strip()
     return "TBD"
 
 def is_uae_national(title):
     return any(w in title.upper() for w in SKIP_KEYWORDS)
 
-async def safe_goto(page, url, label):
-    for attempt in range(2):
-        try:
-            await page.goto(url, timeout=60000, wait_until="domcontentloaded")
-            await asyncio.sleep(3)
-            return True
-        except:
-            if attempt == 0:
-                print(f"  Retrying {label}...")
-                await asyncio.sleep(5)
-            else:
-                print(f"  Skipped {label} (timeout)")
-                return False
-
-# ── SCRAPERS ──────────────────────────────────────────────
-async def scrape_bayt(page, seen_set):
+# ── SCRAPERS (httpx + BeautifulSoup) ─────────────────────
+async def scrape_bayt(client, seen_set):
     jobs = []
-    urls = [
-        ("area manager",       "https://www.bayt.com/en/uae/jobs/area-manager-jobs/"),
-        ("operations manager", "https://www.bayt.com/en/uae/jobs/operations-manager-jobs/"),
-        ("pharmacy manager",   "https://www.bayt.com/en/uae/jobs/pharmacy-manager-jobs/"),
-        ("ecommerce manager",  "https://www.bayt.com/en/uae/jobs/e-commerce-manager-jobs/"),
-        ("cluster manager",    "https://www.bayt.com/en/uae/jobs/cluster-manager-jobs/"),
-        ("regional manager",   "https://www.bayt.com/en/uae/jobs/regional-manager-jobs/"),
-        ("retail manager",     "https://www.bayt.com/en/uae/jobs/retail-manager-jobs/"),
+    searches = [
+        ("area manager",       "area-manager-jobs"),
+        ("operations manager", "operations-manager-jobs"),
+        ("pharmacy manager",   "pharmacy-manager-jobs"),
+        ("ecommerce manager",  "e-commerce-manager-jobs"),
+        ("cluster manager",    "cluster-manager-jobs"),
+        ("regional manager",   "regional-manager-jobs"),
+        ("retail manager",     "retail-manager-jobs"),
     ]
-    for label, url in urls:
-        if not await safe_goto(page, url, f"Bayt {label}"):
-            continue
+    for label, slug in searches:
         try:
-            items = await page.query_selector_all('li[class*="has-pointer-d"]')
+            url = f"https://www.bayt.com/en/uae/jobs/{slug}/"
+            r = await client.get(url)
+            soup = BeautifulSoup(r.text, 'lxml')
+            items = soup.select('li[class*="has-pointer-d"]')
             count = 0
             for item in items[:10]:
                 try:
-                    title   = await (await item.query_selector('h2')).inner_text()
-                    company = await (await item.query_selector('[class*="company"]')).inner_text()
-                    link    = await (await item.query_selector('a')).get_attribute('href')
-                    salary  = extract_salary(await item.inner_text())
-                    title, company = title.strip(), company.strip()
-                    key = f"{company.lower()}_{title.lower()}"
+                    title   = item.select_one('h2').get_text(strip=True)
+                    company = item.select_one('[class*="company"]').get_text(strip=True)
+                    a_tag   = item.select_one('a')
+                    link    = 'https://www.bayt.com' + a_tag['href'] if a_tag else '#'
+                    salary  = extract_salary(item.get_text())
+                    key     = f"{company.lower()}_{title.lower()}"
                     if title and len(title) > 5:
-                        jobs.append({"title": title, "company": company,
-                            "link": f"https://www.bayt.com{link}",
-                            "platform": "Bayt", "salary": salary,
-                            "seen_before": key in seen_set})
+                        jobs.append({"title": title, "company": company, "link": link,
+                            "platform": "Bayt", "salary": salary, "seen_before": key in seen_set})
                         count += 1
                 except: continue
             print(f"  Bayt {label}: {count} jobs")
+            await asyncio.sleep(1)
         except Exception as e:
             print(f"  Bayt {label} error: {e}")
     return jobs
 
-async def scrape_naukrigulf(page, seen_set):
+async def scrape_naukrigulf(client, seen_set):
     jobs = []
-    urls = [
-        ("area manager",       "https://www.naukrigulf.com/area-manager-jobs-in-uae"),
-        ("operations manager", "https://www.naukrigulf.com/operations-manager-jobs-in-uae"),
-        ("pharmacy manager",   "https://www.naukrigulf.com/pharmacy-manager-jobs-in-uae"),
-        ("ecommerce manager",  "https://www.naukrigulf.com/ecommerce-manager-jobs-in-uae"),
-        ("cluster manager",    "https://www.naukrigulf.com/cluster-manager-jobs-in-uae"),
-        ("regional manager",   "https://www.naukrigulf.com/regional-manager-jobs-in-uae"),
-        ("retail manager",     "https://www.naukrigulf.com/retail-manager-jobs-in-uae"),
+    searches = [
+        ("area manager",       "area-manager-jobs-in-uae"),
+        ("operations manager", "operations-manager-jobs-in-uae"),
+        ("pharmacy manager",   "pharmacy-manager-jobs-in-uae"),
+        ("ecommerce manager",  "ecommerce-manager-jobs-in-uae"),
+        ("cluster manager",    "cluster-manager-jobs-in-uae"),
+        ("regional manager",   "regional-manager-jobs-in-uae"),
+        ("retail manager",     "retail-manager-jobs-in-uae"),
     ]
-    for label, url in urls:
-        if not await safe_goto(page, url, f"Naukrigulf {label}"):
-            continue
+    for label, slug in searches:
         try:
-            await asyncio.sleep(2)
-            items = await page.query_selector_all('[class*="tuple"]')
+            url = f"https://www.naukrigulf.com/{slug}"
+            r = await client.get(url)
+            soup = BeautifulSoup(r.text, 'lxml')
+            items = soup.select('[class*="tuple"], [class*="job-listing"], article')
             count = 0
             for item in items[:10]:
                 try:
-                    title_el = await item.query_selector('a[class*="title"], h3 a, h2 a, a')
+                    title_el   = item.select_one('a[class*="title"], h3 a, h2 a, .job-title a')
                     if not title_el: continue
-                    title = (await title_el.inner_text()).strip()
+                    title      = title_el.get_text(strip=True)
                     if len(title) < 5: continue
-                    try:
-                        company_el = await item.query_selector('[class*="company"], [class*="org"]')
-                        company = (await company_el.inner_text()).strip()
-                    except:
-                        company = "Unknown"
-                    link = await title_el.get_attribute('href') or ''
+                    company_el = item.select_one('[class*="company"], [class*="org"], .comp-name')
+                    company    = company_el.get_text(strip=True) if company_el else "Unknown"
+                    link       = title_el.get('href', '#')
                     if not link.startswith('http'):
-                        link = f"https://www.naukrigulf.com{link}"
-                    salary = extract_salary(await item.inner_text())
-                    key = f"{company.lower()}_{title.lower()}"
+                        link = 'https://www.naukrigulf.com' + link
+                    salary     = extract_salary(item.get_text())
+                    key        = f"{company.lower()}_{title.lower()}"
                     if company != "Unknown":
-                        jobs.append({"title": title, "company": company,
-                            "link": link, "platform": "Naukrigulf",
-                            "salary": salary, "seen_before": key in seen_set})
+                        jobs.append({"title": title, "company": company, "link": link,
+                            "platform": "Naukrigulf", "salary": salary, "seen_before": key in seen_set})
                         count += 1
                 except: continue
             print(f"  Naukrigulf {label}: {count} jobs")
+            await asyncio.sleep(1)
         except Exception as e:
             print(f"  Naukrigulf {label} error: {e}")
     return jobs
 
-async def scrape_indeed(page, seen_set):
+async def scrape_linkedin(client, seen_set):
     jobs = []
-    urls = [
-        ("area manager",       "https://ae.indeed.com/jobs?q=area+manager&l=UAE&fromage=1"),
-        ("operations manager", "https://ae.indeed.com/jobs?q=operations+manager&l=UAE&fromage=1"),
-        ("pharmacy manager",   "https://ae.indeed.com/jobs?q=pharmacy+manager&l=UAE&fromage=1"),
-        ("ecommerce manager",  "https://ae.indeed.com/jobs?q=ecommerce+manager&l=UAE&fromage=1"),
-        ("cluster manager",    "https://ae.indeed.com/jobs?q=cluster+manager&l=UAE&fromage=1"),
-        ("retail manager",     "https://ae.indeed.com/jobs?q=retail+operations+manager&l=UAE&fromage=1"),
+    searches = [
+        ("area manager",       "area+manager"),
+        ("operations manager", "operations+manager+retail"),
+        ("pharmacy manager",   "pharmacy+manager"),
+        ("ecommerce manager",  "ecommerce+manager"),
+        ("cluster manager",    "cluster+manager"),
+        ("regional manager",   "regional+manager+retail"),
+        ("retail manager",     "retail+operations+manager"),
     ]
-    for label, url in urls:
-        if not await safe_goto(page, url, f"Indeed {label}"):
-            continue
+    for label, query in searches:
         try:
-            items = await page.query_selector_all('.job_seen_beacon, [class*="jobCard"]')
+            url = (f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+                   f"?keywords={query}&location=United+Arab+Emirates&f_TPR=r86400&start=0")
+            r = await client.get(url)
+            soup = BeautifulSoup(r.text, 'lxml')
+            items = soup.select('li')
             count = 0
             for item in items[:10]:
                 try:
-                    title   = await (await item.query_selector('h2')).inner_text()
-                    company = await (await item.query_selector('[class*="company"]')).inner_text()
-                    link    = await (await item.query_selector('a')).get_attribute('href')
-                    salary  = extract_salary(await item.inner_text())
-                    title, company = title.strip(), company.strip()
-                    key = f"{company.lower()}_{title.lower()}"
-                    if title and len(title) > 5:
-                        jobs.append({"title": title, "company": company,
-                            "link": f"https://ae.indeed.com{link}",
-                            "platform": "Indeed", "salary": salary,
-                            "seen_before": key in seen_set})
-                        count += 1
-                except: continue
-            print(f"  Indeed {label}: {count} jobs")
-        except Exception as e:
-            print(f"  Indeed {label} error: {e}")
-    return jobs
-
-async def scrape_linkedin(page, seen_set):
-    jobs = []
-    urls = [
-        ("area manager",       "https://www.linkedin.com/jobs/search/?keywords=area+manager&location=UAE&f_TPR=r86400"),
-        ("operations manager", "https://www.linkedin.com/jobs/search/?keywords=operations+manager+retail&location=UAE&f_TPR=r86400"),
-        ("pharmacy manager",   "https://www.linkedin.com/jobs/search/?keywords=pharmacy+manager&location=UAE&f_TPR=r86400"),
-        ("ecommerce manager",  "https://www.linkedin.com/jobs/search/?keywords=ecommerce+manager&location=UAE&f_TPR=r86400"),
-        ("cluster manager",    "https://www.linkedin.com/jobs/search/?keywords=cluster+manager&location=UAE&f_TPR=r86400"),
-        ("retail manager",     "https://www.linkedin.com/jobs/search/?keywords=retail+operations+manager&location=UAE&f_TPR=r86400"),
-    ]
-    for label, url in urls:
-        if not await safe_goto(page, url, f"LinkedIn {label}"):
-            continue
-        try:
-            await asyncio.sleep(3)
-            items = await page.query_selector_all('[data-job-id]')
-            count = 0
-            for item in items[:10]:
-                try:
-                    title_el = await item.query_selector('a[class*="job-card-container__link"], a[class*="job-card-list__title"], a')
-                    if not title_el: continue
-                    title = (await title_el.inner_text()).strip()
+                    title_el   = item.select_one('.base-search-card__title, h3')
+                    company_el = item.select_one('.base-search-card__subtitle, h4')
+                    link_el    = item.select_one('a.base-card__full-link, a')
+                    if not title_el or not company_el: continue
+                    title   = title_el.get_text(strip=True)
+                    company = company_el.get_text(strip=True)
+                    link    = link_el.get('href', '#') if link_el else '#'
                     if len(title) < 5: continue
-                    try:
-                        company_el = await item.query_selector('[class*="company-name"], [class*="subtitle"], h4')
-                        company = (await company_el.inner_text()).strip()
-                    except:
-                        company = "Unknown"
-                    link = await title_el.get_attribute('href') or ''
-                    if not link.startswith('http'):
-                        link = f"https://www.linkedin.com{link}"
-                    salary = extract_salary(await item.inner_text())
                     key = f"{company.lower()}_{title.lower()}"
-                    if company != "Unknown":
-                        jobs.append({"title": title, "company": company,
-                            "link": link, "platform": "LinkedIn",
-                            "salary": salary, "seen_before": key in seen_set})
-                        count += 1
+                    jobs.append({"title": title, "company": company, "link": link,
+                        "platform": "LinkedIn", "salary": "TBD", "seen_before": key in seen_set})
+                    count += 1
                 except: continue
             print(f"  LinkedIn {label}: {count} jobs")
+            await asyncio.sleep(1)
         except Exception as e:
             print(f"  LinkedIn {label} error: {e}")
     return jobs
 
+async def scrape_indeed(client, seen_set):
+    jobs = []
+    searches = [
+        ("area manager",       "area+manager"),
+        ("operations manager", "operations+manager"),
+        ("pharmacy manager",   "pharmacy+manager"),
+        ("cluster manager",    "cluster+manager"),
+        ("retail manager",     "retail+operations+manager"),
+    ]
+    for label, query in searches:
+        try:
+            url = f"https://ae.indeed.com/jobs?q={query}&l=UAE&fromage=1"
+            r = await client.get(url)
+            soup = BeautifulSoup(r.text, 'lxml')
+            items = soup.select('.job_seen_beacon, [class*="jobCard"], .resultContent')
+            count = 0
+            for item in items[:10]:
+                try:
+                    title_el   = item.select_one('h2 a, h2 span[title]')
+                    company_el = item.select_one('[data-testid="company-name"], .companyName')
+                    if not title_el: continue
+                    title   = title_el.get_text(strip=True)
+                    company = company_el.get_text(strip=True) if company_el else "Unknown"
+                    a_tag   = item.select_one('h2 a')
+                    link    = 'https://ae.indeed.com' + a_tag['href'] if a_tag and a_tag.get('href') else '#'
+                    salary  = extract_salary(item.get_text())
+                    key     = f"{company.lower()}_{title.lower()}"
+                    if len(title) > 5 and company != "Unknown":
+                        jobs.append({"title": title, "company": company, "link": link,
+                            "platform": "Indeed", "salary": salary, "seen_before": key in seen_set})
+                        count += 1
+                except: continue
+            print(f"  Indeed {label}: {count} jobs")
+            await asyncio.sleep(1)
+        except Exception as e:
+            print(f"  Indeed {label} error: {e}")
+    return jobs
+
 # ── MAIN ──────────────────────────────────────────────────
 def run():
-    """Main entry point — called from Flask background thread or CLI"""
-    if not ANTHROPIC_KEY:
-        send_telegram("⚠️ ANTHROPIC_API_KEY not set on Render — AI matching disabled, all jobs will score 70.")
-        print("WARNING: ANTHROPIC_API_KEY not set")
     if not SHEET_ID:
         send_telegram("❌ SHEET_ID not set on Render — cannot save jobs. Aborting.")
-        print("ERROR: SHEET_ID not set")
         return 0
+    if not ANTHROPIC_KEY:
+        send_telegram("⚠️ ANTHROPIC_API_KEY not set — jobs will use default score 70.")
 
-    all_apply = []
-    deduped   = set()
-
-    send_telegram(f"🚀 Job Hunter started — {TODAY}\nScanning Bayt, Naukrigulf, Indeed, LinkedIn...")
+    send_telegram(f"🚀 Job Hunter started — {TODAY}\nScanning Bayt, Naukrigulf, LinkedIn, Indeed...")
     print(f"\n{'='*50}\n🚀 Job Hunter Cloud — {TODAY}\n{'='*50}")
 
     seen_set = load_seen_before()
-    print(f"📂 {len(seen_set)} previously seen jobs loaded from Sheets")
+    print(f"📂 {len(seen_set)} previously seen jobs loaded")
 
     async def scrape_all():
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--single-process',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-background-networking',
-                ]
-            )
-            context = await browser.new_context(
-                user_agent=(
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                    'AppleWebKit/537.36 (KHTML, like Gecko) '
-                    'Chrome/120.0.0.0 Safari/537.36'
-                ),
-                viewport={'width': 1280, 'height': 800}
-            )
-            page = await context.new_page()
-
+        async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True,
+                                     timeout=30.0, verify=False) as client:
             print("\n🔍 Scraping Bayt...")
-            jobs = await scrape_bayt(page, seen_set)
+            jobs = await scrape_bayt(client, seen_set)
             print("\n🔍 Scraping Naukrigulf...")
-            jobs += await scrape_naukrigulf(page, seen_set)
-            print("\n🔍 Scraping Indeed...")
-            jobs += await scrape_indeed(page, seen_set)
+            jobs += await scrape_naukrigulf(client, seen_set)
             print("\n🔍 Scraping LinkedIn...")
-            jobs += await scrape_linkedin(page, seen_set)
-
-            await browser.close()
+            jobs += await scrape_linkedin(client, seen_set)
+            print("\n🔍 Scraping Indeed...")
+            jobs += await scrape_indeed(client, seen_set)
             return jobs
 
     all_raw = asyncio.run(scrape_all())
-
-    print(f"\n📊 Total scraped: {len(all_raw)} — now AI-matching...")
+    print(f"\n📊 Total scraped: {len(all_raw)} — AI matching...")
     send_telegram(f"📊 Scraped {len(all_raw)} jobs. Running AI match...")
 
+    all_apply = []
+    deduped   = set()
     for job in all_raw:
-        title   = job['title']
-        company = job['company']
-        key     = f"{title.lower()}_{company.lower()}"
-
-        if key in deduped or len(title) < 8 or company == "Unknown":
+        key = f"{job['title'].lower()}_{job['company'].lower()}"
+        if key in deduped or len(job['title']) < 8 or job['company'] == "Unknown":
             continue
         deduped.add(key)
-
-        if is_uae_national(title):
-            print(f"🚫 SKIP (UAE National) — {title}")
+        if is_uae_national(job['title']):
+            print(f"🚫 SKIP (UAE National) — {job['title']}")
             continue
-
-        score, apply = match_job(title, company, job.get('salary', ''))
-
+        score, apply = match_job(job['title'], job['company'], job.get('salary', ''))
         if apply and score >= 60:
             tag = "👀 SEEN" if job.get('seen_before') else "🆕 NEW"
-            print(f"{tag} ({score}%) — {title} @ {company} [{job['platform']}]")
+            print(f"{tag} ({score}%) — {job['title']} @ {job['company']}")
             all_apply.append({**job, "score": score})
         else:
-            print(f"❌ SKIP ({score}%) — {title} @ {company}")
+            print(f"❌ SKIP ({score}%) — {job['title']} @ {job['company']}")
 
     all_apply.sort(key=lambda x: -x['score'])
     save_to_sheets(all_apply)
     send_telegram_job_list(all_apply)
 
-    print(f"\n{'='*50}")
-    print(f"🎯 DONE — {len(all_apply)} matching jobs saved to Google Sheets")
-    print('='*50)
+    print(f"\n🎯 DONE — {len(all_apply)} matching jobs saved")
     return len(all_apply)
 
 if __name__ == "__main__":
