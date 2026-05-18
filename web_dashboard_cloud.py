@@ -584,26 +584,29 @@ def generate_cv():
                     print(f"CV: could not fetch job URL: {fe}")
 
             # 2. Generate with Claude
+            job_desc_section = ("FULL JOB DESCRIPTION:\n" + job_desc + "\n") if job_desc else ""
+            prompt = (
+                "You are a professional CV writer. Create tailored application materials.\n\n"
+                "JOB: " + job.get('title', '') + " at " + job.get('company', '') + "\n"
+                "SALARY: " + job.get('salary', 'TBD') + " | PLATFORM: " + job.get('platform', '') + "\n"
+                + job_desc_section +
+                "CANDIDATE RESUME:\n" + MY_FULL_RESUME + "\n\n"
+                "Provide EXACTLY these 3 sections:\n\n"
+                "🎯 TOP 3 SELLING POINTS\n"
+                "Why Mohammed is perfect for THIS role — cite his exact numbers.\n\n"
+                "📝 COVER LETTER\n"
+                "Dear Hiring Manager,\n"
+                "[4 paragraphs: excitement about this company/role, strongest matching "
+                "achievement with numbers, unique value he brings, confident close]\n\n"
+                "💡 CV TIPS FOR THIS ROLE\n"
+                "Which 3-4 achievements to lead with for this application.\n\n"
+                "Be specific — no generic phrases. Under 700 words total."
+            )
             ai  = ant.Anthropic(api_key=api_key)
             msg = ai.messages.create(
                 model="claude-haiku-4-5",
                 max_tokens=1800,
-                messages=[{"role": "user", "content":
-                    f"You are a professional CV writer. Create tailored application materials.\n\n"
-                    f"JOB: {job.get('title','')} at {job.get('company','')}\n"
-                    f"SALARY: {job.get('salary','TBD')} | PLATFORM: {job.get('platform','')}\n"
-                    f"{('FULL JOB DESCRIPTION:\n' + job_desc + chr(10)) if job_desc else ''}\n"
-                    f"CANDIDATE RESUME:\n{MY_FULL_RESUME}\n\n"
-                    f"Provide EXACTLY these 3 sections:\n\n"
-                    f"🎯 TOP 3 SELLING POINTS\n"
-                    f"Why Mohammed is perfect for THIS role — cite his exact numbers.\n\n"
-                    f"📝 COVER LETTER\n"
-                    f"Dear Hiring Manager,\n"
-                    f"[4 paragraphs: excitement about this company/role, strongest matching "
-                    f"achievement with numbers, unique value he brings, confident close]\n\n"
-                    f"💡 CV TIPS FOR THIS ROLE\n"
-                    f"Which 3-4 achievements to lead with for this application.\n\n"
-                    f"Be specific — no generic phrases. Under 700 words total."}]
+                messages=[{"role": "user", "content": prompt}]
             )
             content = msg.content[0].text
 
