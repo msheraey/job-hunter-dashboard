@@ -214,191 +214,122 @@ def match_job(title, company, salary=""):
 
 # ── SCRAPERS ─────────────────────────────────────────────
 
-async def scrape_bayt(client, seen_set, on_progress=None):
+async def scrape_rss(client, seen_set, platform, rss_url_fn, searches,
+                     pct_start, pct_end, on_progress=None):
     """
-    Bayt.com — uses their SEARCH URL (?q=...) which is server-side rendered.
-    The old category URLs (/area-manager-jobs/) are JS-rendered → always 0.
+    Generic RSS scraper — shared by Bayt and Naukrigulf.
+    rss_url_fn(query) returns the RSS URL for a given search term.
     """
+    import xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
+
     jobs = []
-    searches = [
-        "area manager",
-        "operations manager",
-        "pharmacy manager",
-        "ecommerce manager",
-        "cluster manager",
-        "regional manager",
-        "retail manager",
-    ]
     n = len(searches)
     for i, label in enumerate(searches):
-        pct = 10 + int(((i + 1) / n) * 17)
+        pct = pct_start + int(((i + 1) / n) * (pct_end - pct_start))
         try:
-            q   = label.replace(' ', '+')
-            url = f"https://www.bayt.com/en/uae/jobs/?q={q}"
+            url = rss_url_fn(label.replace(' ', '+'))
             r   = await client.get(url, headers={
                 **HEADERS,
-                'Referer': 'https://www.bayt.com/en/uae/jobs/',
+                'Accept': 'application/rss+xml, application/xml, text/xml, */*',
             })
-            print(f"  Bayt [{label}] status={r.status_code} len={len(r.text)}")
-            soup = BeautifulSoup(r.text, 'lxml')
+            print(f"  {platform} RSS [{label}] status={r.status_code} len={len(r.text)}")
 
-            # Strategy 1: data-job-id li elements
-            items = soup.select('li[data-job-id]')
-            # Strategy 2: has-pointer class
-            if not items:
-                items = soup.select('li[class*="has-pointer"]')
-            # Strategy 3: any li with an h2 link
-            if not items:
-                items = [li for li in soup.select('li')
-                         if li.select_one('h2 a[href*="/jobs/"]')]
-            # Strategy 4: generic job-link extraction
-            if not items:
-                raw_links = soup.select('a[href*="/en/uae/jobs/"]')
-                job_links = [a for a in raw_links
-                             if a.get('href', '').count('/') >= 6
-                             and a.get_text(strip=True)]
-                for a in job_links[:MAX_JOBS_PER_SEARCH]:
-                    title   = a.get_text(strip=True)
-                    parent  = a.find_parent('li') or a.find_parent('div')
-                    comp_el = parent.select_one('b, [class*="company"], [class*="jb-info"]') if parent else None
-                    company = comp_el.get_text(strip=True) if comp_el else "Unknown"
-                    link    = fix_link(a.get('href', '#'), 'https://www.bayt.com')
-                    date_el = parent.select_one('[class*="date"], time') if parent else None
-                    posted_date = parse_posted_date(date_el.get_text(strip=True) if date_el else '')
-                    if len(title) >= 5:
-                        key = f"{company.lower()}_{title.lower()}"
-                        jobs.append({"title": title, "company": company, "link": link,
-                                     "platform": "Bayt", "salary": "TBD",
-                                     "posted_date": posted_date,
-                                     "seen_before": key in seen_set})
-                count = len(jobs) - sum(1 for j in jobs if j['platform'] != 'Bayt')
-                msg = f"🏢 Bayt: {label} → {count} jobs found"
-                if on_progress:
-                    on_progress(msg, pct)
-                print(f"  {msg}")
-                await asyncio.sleep(2)
-                continue
+            try:
+                root  = ET.fromstring(r.text)
+                items = root.findall('.//item')
+            except ET.ParseError:
+                items = []
 
             count = 0
             for item in items[:MAX_JOBS_PER_SEARCH]:
                 try:
-                    title_el = (item.select_one('h2 a')
-                                or item.select_one('[class*="title"] a')
-                                or item.select_one('a[href*="/jobs/"]'))
-                    if not title_el:
+                    raw_title = (item.findtext('title') or '').strip()
+                    link      = (item.findtext('link') or '#').strip()
+                    desc      = (item.findtext('description') or '').strip()
+                    pub_date  = (item.findtext('pubDate') or '').strip()
+
+                    # Common RSS title format: "Job Title - Company (Location)"
+                    if ' - ' in raw_title:
+                        job_title, rest = raw_title.rsplit(' - ', 1)
+                        company = rest.split('(')[0].strip()
+                    else:
+                        job_title = raw_title
+                        company   = "Unknown"
+
+                    job_title = job_title.strip()
+                    company   = company.strip() or "Unknown"
+                    if len(job_title) < 5:
                         continue
-                    title = title_el.get_text(strip=True)
-                    if len(title) < 5:
-                        continue
-                    comp_el = (item.select_one('[class*="jb-company"]')
-                               or item.select_one('b[class*="t-"]')
-                               or item.select_one('[class*="jb-attrs"] a')
-                               or item.select_one('b'))
-                    company = comp_el.get_text(strip=True) if comp_el else "Unknown"
-                    href    = title_el.get('href', '#')
-                    link    = fix_link(href, 'https://www.bayt.com')
-                    salary  = extract_salary(item.get_text())
-                    date_el = (item.select_one('[class*="date"]') or item.select_one('time'))
-                    posted_date = parse_posted_date(date_el.get_text(strip=True) if date_el else '')
-                    key     = f"{company.lower()}_{title.lower()}"
-                    jobs.append({"title": title, "company": company, "link": link,
-                                 "platform": "Bayt", "salary": salary,
-                                 "posted_date": posted_date,
-                                 "seen_before": key in seen_set})
+
+                    posted_date = TODAY
+                    if pub_date:
+                        try:
+                            posted_date = parsedate_to_datetime(pub_date).strftime('%Y-%m-%d')
+                        except Exception:
+                            posted_date = parse_posted_date(pub_date)
+
+                    if not link.startswith('http'):
+                        link = '#'
+
+                    salary = extract_salary(desc)
+                    key    = f"{company.lower()}_{job_title.lower()}"
+                    jobs.append({
+                        "title":       job_title,
+                        "company":     company,
+                        "link":        link,
+                        "platform":    platform,
+                        "salary":      salary,
+                        "posted_date": posted_date,
+                        "seen_before": key in seen_set,
+                    })
                     count += 1
                 except Exception:
                     continue
 
-            msg = f"🏢 Bayt: {label} → {count} jobs found"
+            msg = f"{platform}: {label} → {count} jobs found"
             if on_progress:
                 on_progress(msg, pct)
             print(f"  {msg}")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.5)
         except Exception as e:
-            msg = f"🏢 Bayt: {label} → error: {str(e)[:60]}"
+            msg = f"{platform}: {label} → error: {str(e)[:60]}"
             if on_progress:
                 on_progress(msg, pct)
             print(f"  {msg}")
     return jobs
+
+
+async def scrape_bayt(client, seen_set, on_progress=None):
+    """Bayt UAE — RSS feed."""
+    searches = [
+        "area manager", "operations manager", "pharmacy manager",
+        "ecommerce manager", "cluster manager", "regional manager", "retail manager",
+    ]
+    return await scrape_rss(
+        client, seen_set,
+        platform  = "🏢 Bayt",
+        rss_url_fn= lambda q: f"https://www.bayt.com/en/rss/jobs/?q={q}&country_id=2",
+        searches  = searches,
+        pct_start = 10, pct_end = 27,
+        on_progress = on_progress,
+    )
 
 
 async def scrape_naukrigulf(client, seen_set, on_progress=None):
-    """
-    Naukrigulf — uses their search URL (?q=...&location=uae).
-    The old slug-based URLs were returning errors.
-    """
-    jobs = []
+    """Naukrigulf UAE — RSS feed."""
     searches = [
-        "area manager",
-        "operations manager",
-        "pharmacy manager",
-        "ecommerce manager",
-        "cluster manager",
-        "regional manager",
-        "retail manager",
+        "area manager", "operations manager", "pharmacy manager",
+        "ecommerce manager", "cluster manager", "regional manager", "retail manager",
     ]
-    n = len(searches)
-    for i, label in enumerate(searches):
-        pct = 27 + int(((i + 1) / n) * 17)
-        try:
-            q   = label.replace(' ', '+')
-            url = f"https://www.naukrigulf.com/jobs?q={q}&location=uae&searchType=1"
-            r   = await client.get(url, headers={
-                **HEADERS,
-                'Referer': 'https://www.naukrigulf.com/',
-            })
-            print(f"  Naukrigulf [{label}] status={r.status_code} len={len(r.text)}")
-            soup = BeautifulSoup(r.text, 'lxml')
-
-            items = (soup.select('[class*="tuple-card"]')
-                     or soup.select('[class*="job-tuple"]')
-                     or soup.select('[class*="srp-tuple"]')
-                     or soup.select('article')
-                     or soup.select('[class*="tuple"]'))
-
-            count = 0
-            for item in items[:MAX_JOBS_PER_SEARCH]:
-                try:
-                    title_el = (item.select_one('a[class*="title"]')
-                                or item.select_one('h3 a')
-                                or item.select_one('h2 a')
-                                or item.select_one('.job-title a'))
-                    if not title_el:
-                        continue
-                    title = title_el.get_text(strip=True)
-                    if len(title) < 5:
-                        continue
-                    comp_el = (item.select_one('[class*="company-name"]')
-                               or item.select_one('[class*="comp-name"]')
-                               or item.select_one('[class*="org"]'))
-                    company = comp_el.get_text(strip=True) if comp_el else "Unknown"
-                    href    = title_el.get('href', '#')
-                    link    = fix_link(href, 'https://www.naukrigulf.com')
-                    salary  = extract_salary(item.get_text())
-                    date_el = (item.select_one('[class*="date"]') or item.select_one('time') or
-                               item.select_one('[class*="ago"]'))
-                    posted_date = parse_posted_date(date_el.get_text(strip=True) if date_el else '')
-                    key     = f"{company.lower()}_{title.lower()}"
-                    if company != "Unknown":
-                        jobs.append({"title": title, "company": company, "link": link,
-                                     "platform": "Naukrigulf", "salary": salary,
-                                     "posted_date": posted_date,
-                                     "seen_before": key in seen_set})
-                        count += 1
-                except Exception:
-                    continue
-
-            msg = f"🔎 Naukrigulf: {label} → {count} jobs found"
-            if on_progress:
-                on_progress(msg, pct)
-            print(f"  {msg}")
-            await asyncio.sleep(2)
-        except Exception as e:
-            msg = f"🔎 Naukrigulf: {label} → error: {str(e)[:60]}"
-            if on_progress:
-                on_progress(msg, pct)
-            print(f"  {msg}")
-    return jobs
+    return await scrape_rss(
+        client, seen_set,
+        platform  = "🔎 Naukrigulf",
+        rss_url_fn= lambda q: f"https://www.naukrigulf.com/rss/{q}-jobs-in-uae",
+        searches  = searches,
+        pct_start = 27, pct_end = 44,
+        on_progress = on_progress,
+    )
 
 
 async def scrape_linkedin(client, seen_set, on_progress=None):
