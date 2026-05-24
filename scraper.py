@@ -389,15 +389,16 @@ def fetch_google_jobs(query_label, search_query, seen_set):
     try:
         # SerpAPI Google Jobs endpoint
         # gl=ae = UAE, hl=en = English, chips=date_posted:week = last 7 days
+        # Use regular Google search with site: filter
+        # google_jobs engine ignores site: operator — must use google engine instead
         params = {
-            "engine":      "google_jobs",
-            "q":           search_query,
-            "location":    "United Arab Emirates",
-            "gl":          "ae",
-            "hl":          "en",
-            "chips":       "date_posted:week",  # Last 7 days only
-            "num":         10,                  # Up to 10 results
-            "api_key":     SERPAPI_KEY,
+            "engine":  "google",
+            "q":       search_query,  # e.g. "area manager UAE site:linkedin.com"
+            "gl":      "ae",
+            "hl":      "en",
+            "num":     10,
+            "tbs":     "qdr:w",       # Last 7 days
+            "api_key": SERPAPI_KEY,
         }
 
         response = requests.get(
@@ -412,60 +413,58 @@ def fetch_google_jobs(query_label, search_query, seen_set):
 
         data = response.json()
 
-        # Check for SerpAPI errors
         if "error" in data:
             print(f"  ❌ SerpAPI error for '{query_label}': {data['error']}")
             return jobs
 
-        job_results = data.get("jobs_results", [])
+        # Regular Google search returns organic_results, not jobs_results
+        job_results = data.get("organic_results", [])
 
         if not job_results:
             print(f"  ⚠ No results from SerpAPI for: {query_label}")
             return jobs
 
+        # platform name from query_label e.g. "area manager | LinkedIn" → "LinkedIn"
+        platform = query_label.split("|")[-1].strip()
+
         count = 0
-        for job_data in job_results[:10]:
+        for result in job_results[:10]:
             if count >= 10:
                 break
 
-            title   = job_data.get("title", "").strip()
-            company = job_data.get("company_name", "Unknown").strip()
+            # organic_results fields: title, link, snippet, displayed_link
+            raw_title = result.get("title", "").strip()
+            link      = result.get("link", "").strip()
+            snippet   = result.get("snippet", "").strip()
 
-            if len(title) < 5:
+            if not raw_title or len(raw_title) < 5 or not link:
                 continue
+
+            # Clean title — job board pages often have format "Job Title - Company | Site"
+            # Extract just the job title part
+            title = re.split(r'\s*[-|–]\s*', raw_title)[0].strip()
+            if len(title) < 5:
+                title = raw_title[:80]
+
+            # Extract company from title remainder or snippet
+            parts   = re.split(r'\s*[-|–]\s*', raw_title)
+            company = parts[1].strip() if len(parts) > 1 else "Unknown"
+            # Remove platform name from company if present
+            company = re.sub(r'(LinkedIn|Bayt|Indeed|Naukrigulf|GulfTalent)', '', company).strip()
+            if not company or len(company) < 2:
+                company = "Unknown"
+
             if is_skip(title):
                 print(f"    🚫 UAE National — {title[:45]}")
                 continue
 
-            # Extract job details
-            location = job_data.get("location", "UAE")
-            if not location:
-                extensions = job_data.get("detected_extensions", {})
-                location   = extensions.get("location", "UAE")
+            # Location from snippet
+            loc_m    = re.search(r'(Dubai|Abu Dhabi|Sharjah|Ajman|UAE|Ras Al Khaimah)', snippet)
+            location = loc_m.group(0) if loc_m else "UAE"
 
-            extensions  = job_data.get("detected_extensions", {})
-            date_listed = extensions.get("posted_at", "Recent")
-            description = job_data.get("description", "")
-
-            # Link — take first available apply option
-            # Since query already has site: filter, link is guaranteed from trusted source
-            apply_options = job_data.get("apply_options", [])
-            link     = ""
-            platform = query_label.split("|")[-1].strip()  # e.g. "area manager | LinkedIn" → "LinkedIn"
-
-            for opt in apply_options:
-                opt_link = opt.get("link", "")
-                if opt_link and opt_link.startswith("http"):
-                    link     = opt_link
-                    platform = opt.get("title", platform)
-                    break
-
-            # Fallback to share link
-            if not link:
-                link = job_data.get("share_link", "")
-            if not link:
-                q    = f"{title} {company} UAE jobs".replace(" ", "+")
-                link = f"https://www.google.com/search?q={q}&ibp=htl;jobs"
+            # Date from snippet
+            date_m      = re.search(r'(\d+\s+(?:hour|day|week)s?\s+ago|today|just posted)', snippet, re.I)
+            date_listed = date_m.group(0) if date_m else "Recent"
 
             key         = f"{company.lower()}_{title.lower()}"
             seen_before = key in seen_set
@@ -477,7 +476,7 @@ def fetch_google_jobs(query_label, search_query, seen_set):
                 "date_listed": date_listed,
                 "link":        link,
                 "platform":    platform,
-                "description": description[:1500],
+                "description": snippet,
                 "seen_before": seen_before,
                 "query":       query_label,
             })
