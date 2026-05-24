@@ -276,7 +276,7 @@ def fetch_jobs(query_label, search_query, site_name, site_domain, seen_set):
     try:
         params = {
             "engine":   "google_jobs",
-            "q":        f"{search_query} site:{site_domain}",
+            "q":        search_query,          # Clean query — no site: filter (not supported by google_jobs)
             "location": "United Arab Emirates",
             "gl":       "ae",
             "hl":       "en",
@@ -508,42 +508,40 @@ def run(progress_callback=None):
         if progress_callback:
             progress_callback(step, pct)
 
-    total_searches = len(SEARCH_QUERIES) * len(TRUSTED_SITES)  # 16 × 5 = 80
+    total_searches = len(SEARCH_QUERIES)
 
     progress(f"🚀 Job Hunter — Monthly Full Sweep ({total_searches} searches)", 2)
     send_telegram(
         f"🚀 Job Hunter Monthly Sweep — {TODAY}\n"
-        f"🔍 {len(SEARCH_QUERIES)} titles × {len(TRUSTED_SITES)} sites = {total_searches} searches\n"
-        f"📅 Last 7 days | Trusted sources only"
+        f"🔍 {total_searches} role searches | Trusted sources only\n"
+        f"📅 Last 7 days"
     )
 
     progress("📂 Loading seen jobs...", 3)
     seen_set  = load_seen_before()
     all_jobs  = []
     seen_keys = set()
-    done_searches = 0
+    total_q   = len(SEARCH_QUERIES)
 
-    for query_label, search_query in SEARCH_QUERIES:
-        for site_name, site_domain in TRUSTED_SITES:
-            done_searches += 1
-            pct = 3 + int((done_searches / total_searches) * 47)
-            progress(f"🔍 {query_label} [{site_name}]", pct)
+    for i, (query_label, search_query) in enumerate(SEARCH_QUERIES):
+        pct = 3 + int(((i) / total_q) * 47)
+        progress(f"🔍 {query_label}", pct)
 
-            jobs = fetch_jobs(query_label, search_query,
-                              site_name, site_domain, seen_set)
+        # Use first trusted site name as label — filtering happens on results
+        jobs = fetch_jobs(query_label, search_query, "Google Jobs", "", seen_set)
 
-            new_count = 0
-            for job in jobs:
-                key = f"{job['title'].lower()}_{job['company'].lower()}"
-                if key not in seen_keys and len(job["title"]) >= 5:
-                    seen_keys.add(key)
-                    all_jobs.append(job)
-                    new_count += 1
+        new_count = 0
+        for job in jobs:
+            key = f"{job['title'].lower()}_{job['company'].lower()}"
+            if key not in seen_keys and len(job["title"]) >= 5:
+                seen_keys.add(key)
+                all_jobs.append(job)
+                new_count += 1
 
-            if new_count:
-                print(f"    ✅ {new_count} unique jobs added")
+        if new_count:
+            print(f"    ✅ {new_count} unique jobs added")
 
-            time.sleep(0.5)  # Light delay between SerpAPI calls
+        time.sleep(0.5)
 
     progress(f"📊 {len(all_jobs)} unique jobs — scoring with AI...", 52)
 
