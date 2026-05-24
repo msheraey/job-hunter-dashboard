@@ -130,9 +130,33 @@ PARTIAL_FIT = [
 def is_skip(title):
     return any(kw in title.upper() for kw in SKIP_KEYWORDS)
 
+# Target roles — never hard-block these regardless of other keywords
+TARGET_WHITELIST = [
+    "pharmacist in charge",
+    "pharmacy manager",
+    "pharmacy director",
+    "regional manager",
+    "area manager",
+    "cluster manager",
+    "district manager",
+    "operations manager",
+    "retail manager",
+    "ecommerce manager",
+    "omnichannel manager",
+    "supply chain manager",
+    "division manager",
+    "general manager",
+]
+
 def pre_screen(title, company=""):
-    # Title only — not description (descriptions legitimately mention any industry)
+    # Title only — not description
     text = (title + " " + company).lower()
+
+    # Whitelist check first — target roles are never hard-blocked
+    for tw in TARGET_WHITELIST:
+        if tw in text:
+            return "ok", ""
+
     for kw in HARD_BLOCK:
         if kw in text:
             return "block", f"Hard disqualifier: '{kw}'"
@@ -206,6 +230,7 @@ CACHED_SYSTEM = (
     "- Staff pharmacist, technician, junior, coordinator, assistant → max 15\n"
     "- Wrong industry: construction, fabrication, glazing, aquatics, engineering,\n"
     "  hospitality/F&B, manufacturing, warehouse floor, finance, automotive, maritime\n"
+    "- Note: luxury retail is NOT a hard disqualifier — score 45-60 based on transferability\n"
     "- UAE Nationals / Emiratis / gender restricted\n"
     "- Requires <5 years experience → max 20\n\n"
     "PARTIAL FIT → score 35-55, apply: false, flag: '3pl_partial'\n"
