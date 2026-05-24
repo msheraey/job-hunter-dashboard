@@ -342,17 +342,32 @@ def match_job(title, company, location="", description="", date_listed=""):
             return 0, False, str(e), "Unknown", "none"
 
 # ── Google Jobs HTTP scraper ──────────────────────────────────────────────
+# 8 unique target roles × 5 trusted sites = 40 searches per run
+# Each search returns latest 10 results = up to 400 jobs before deduplication
+ROLES = [
+    "area manager",
+    "regional manager",
+    "operations manager",
+    "pharmacy manager",
+    "ecommerce manager",
+    "supply chain manager",
+    "retail manager",
+    "omnichannel manager",
+]
+
+TRUSTED_SITES = [
+    ("LinkedIn",   "site:linkedin.com"),
+    ("Bayt",       "site:bayt.com"),
+    ("Indeed",     "site:indeed.com"),
+    ("Naukrigulf", "site:naukrigulf.com"),
+    ("GulfTalent", "site:gulftalent.com"),
+]
+
+# Build 40 queries — one per role per site
 SEARCH_QUERIES = [
-    ("area manager",         "area manager UAE Dubai"),
-    ("operations manager",   "operations manager retail UAE Dubai"),
-    ("pharmacy manager",     "pharmacy manager UAE DHA Dubai"),
-    ("ecommerce manager",    "ecommerce manager UAE marketplace Dubai"),
-    ("cluster manager",      "cluster manager UAE retail Dubai"),
-    ("regional manager",     "regional manager retail UAE Dubai"),
-    ("supply chain manager", "supply chain manager UAE Dubai"),
-    ("retail manager",       "retail operations manager UAE Dubai"),
-    ("district manager",     "district manager retail UAE Dubai"),
-    ("omnichannel manager",  "omnichannel manager UAE Dubai"),
+    (f"{role} | {platform}", f"{role} UAE {site_filter}")
+    for role in ROLES
+    for platform, site_filter in TRUSTED_SITES
 ]
 
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
@@ -408,14 +423,8 @@ def fetch_google_jobs(query_label, search_query, seen_set):
             print(f"  ⚠ No results from SerpAPI for: {query_label}")
             return jobs
 
-        # Only keep jobs that have a listing on a trusted platform
-        TRUSTED_DOMAINS = [
-            "linkedin.com", "bayt.com", "indeed.com", "naukrigulf.com",
-            "gulftalent.com",
-        ]
-
         count = 0
-        for job_data in job_results[:20]:  # Check more, filter down to 10 trusted
+        for job_data in job_results[:10]:
             if count >= 10:
                 break
 
@@ -428,26 +437,7 @@ def fetch_google_jobs(query_label, search_query, seen_set):
                 print(f"    🚫 UAE National — {title[:45]}")
                 continue
 
-            # ── Trusted source filter ─────────────────────────────────────
-            # Only accept jobs that have a link from a trusted job board.
-            # If no trusted link exists, skip this job entirely.
-            apply_options = job_data.get("apply_options", [])
-            trusted_link     = ""
-            trusted_platform = ""
-
-            for opt in apply_options:
-                opt_link  = opt.get("link", "")
-                opt_title = opt.get("title", "")
-                if any(t in opt_link for t in TRUSTED_DOMAINS):
-                    trusted_link     = opt_link
-                    trusted_platform = opt_title
-                    break
-
-            if not trusted_link:
-                print(f"    ⏭  No trusted source — skipping: {title[:45]}")
-                continue  # Skip jobs not on LinkedIn/Bayt/Indeed/Naukrigulf/GulfTalent
-
-            # ── Extract job details ───────────────────────────────────────
+            # Extract job details
             location = job_data.get("location", "UAE")
             if not location:
                 extensions = job_data.get("detected_extensions", {})
@@ -457,6 +447,26 @@ def fetch_google_jobs(query_label, search_query, seen_set):
             date_listed = extensions.get("posted_at", "Recent")
             description = job_data.get("description", "")
 
+            # Link — take first available apply option
+            # Since query already has site: filter, link is guaranteed from trusted source
+            apply_options = job_data.get("apply_options", [])
+            link     = ""
+            platform = query_label.split("|")[-1].strip()  # e.g. "area manager | LinkedIn" → "LinkedIn"
+
+            for opt in apply_options:
+                opt_link = opt.get("link", "")
+                if opt_link and opt_link.startswith("http"):
+                    link     = opt_link
+                    platform = opt.get("title", platform)
+                    break
+
+            # Fallback to share link
+            if not link:
+                link = job_data.get("share_link", "")
+            if not link:
+                q    = f"{title} {company} UAE jobs".replace(" ", "+")
+                link = f"https://www.google.com/search?q={q}&ibp=htl;jobs"
+
             key         = f"{company.lower()}_{title.lower()}"
             seen_before = key in seen_set
 
@@ -465,14 +475,14 @@ def fetch_google_jobs(query_label, search_query, seen_set):
                 "company":     company,
                 "location":    location,
                 "date_listed": date_listed,
-                "link":        trusted_link,
-                "platform":    trusted_platform,
+                "link":        link,
+                "platform":    platform,
                 "description": description[:1500],
                 "seen_before": seen_before,
                 "query":       query_label,
             })
             count += 1
-            print(f"    📌 {title[:50]} — {company[:30]} [{trusted_platform}]")
+            print(f"    📌 {title[:50]} — {company[:30]} [{platform}]")
 
     except Exception as e:
         print(f"  ❌ SerpAPI error for '{query_label}': {e}")
