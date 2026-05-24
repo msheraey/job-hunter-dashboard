@@ -408,8 +408,17 @@ def fetch_google_jobs(query_label, search_query, seen_set):
             print(f"  ⚠ No results from SerpAPI for: {query_label}")
             return jobs
 
+        # Only keep jobs that have a listing on a trusted platform
+        TRUSTED_DOMAINS = [
+            "linkedin.com", "bayt.com", "indeed.com", "naukrigulf.com",
+            "gulftalent.com",
+        ]
+
         count = 0
-        for job_data in job_results[:10]:
+        for job_data in job_results[:20]:  # Check more, filter down to 10 trusted
+            if count >= 10:
+                break
+
             title   = job_data.get("title", "").strip()
             company = job_data.get("company_name", "Unknown").strip()
 
@@ -419,36 +428,34 @@ def fetch_google_jobs(query_label, search_query, seen_set):
                 print(f"    🚫 UAE National — {title[:45]}")
                 continue
 
-            # Location — SerpAPI returns detected_extensions.location or location field
+            # ── Trusted source filter ─────────────────────────────────────
+            # Only accept jobs that have a link from a trusted job board.
+            # If no trusted link exists, skip this job entirely.
+            apply_options = job_data.get("apply_options", [])
+            trusted_link     = ""
+            trusted_platform = ""
+
+            for opt in apply_options:
+                opt_link  = opt.get("link", "")
+                opt_title = opt.get("title", "")
+                if any(t in opt_link for t in TRUSTED_DOMAINS):
+                    trusted_link     = opt_link
+                    trusted_platform = opt_title
+                    break
+
+            if not trusted_link:
+                print(f"    ⏭  No trusted source — skipping: {title[:45]}")
+                continue  # Skip jobs not on LinkedIn/Bayt/Indeed/Naukrigulf/GulfTalent
+
+            # ── Extract job details ───────────────────────────────────────
             location = job_data.get("location", "UAE")
             if not location:
                 extensions = job_data.get("detected_extensions", {})
                 location   = extensions.get("location", "UAE")
 
-            # Date listed — SerpAPI returns detected_extensions.posted_at
             extensions  = job_data.get("detected_extensions", {})
             date_listed = extensions.get("posted_at", "Recent")
-
-            # Job description — SerpAPI returns description field
             description = job_data.get("description", "")
-
-            # Apply link — SerpAPI returns apply_options list
-            link = ""
-            apply_options = job_data.get("apply_options", [])
-            if apply_options:
-                link = apply_options[0].get("link", "")
-            if not link:
-                # Fallback to share link
-                link = job_data.get("share_link", "")
-            if not link:
-                link = f"https://www.google.com/search?q={title.replace(' ', '+')}+{company.replace(' ', '+')}+UAE+jobs"
-
-            # Platform — which job board it came from
-            platform = "Google Jobs"
-            if apply_options:
-                source = apply_options[0].get("title", "")
-                if source:
-                    platform = source  # e.g. "LinkedIn", "Bayt", "Indeed"
 
             key         = f"{company.lower()}_{title.lower()}"
             seen_before = key in seen_set
@@ -458,14 +465,14 @@ def fetch_google_jobs(query_label, search_query, seen_set):
                 "company":     company,
                 "location":    location,
                 "date_listed": date_listed,
-                "link":        link,
-                "platform":    platform,
+                "link":        trusted_link,
+                "platform":    trusted_platform,
                 "description": description[:1500],
                 "seen_before": seen_before,
                 "query":       query_label,
             })
             count += 1
-            print(f"    📌 {title[:50]} — {company[:30]} [{platform}]")
+            print(f"    📌 {title[:50]} — {company[:30]} [{trusted_platform}]")
 
     except Exception as e:
         print(f"  ❌ SerpAPI error for '{query_label}': {e}")
