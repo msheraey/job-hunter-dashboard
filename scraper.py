@@ -9,12 +9,10 @@ import os
 import re
 import json
 import time
-import random
 import threading
 from datetime import date, timedelta, datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import httpx
 import anthropic
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -357,186 +355,63 @@ SEARCH_QUERIES = [
     ("omnichannel manager",  "omnichannel manager UAE Dubai"),
 ]
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-]
+SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 
 
 def fetch_google_jobs(query_label, search_query, seen_set):
     """
-    Fetches Google Jobs results for a search query using httpx.
-    Parses job cards from the HTML response.
-    Returns list of job dicts.
+    Fetches Google Jobs results via SerpAPI.
+    Returns structured job data — no HTML parsing, no bot detection issues.
+    SerpAPI Google Jobs endpoint: https://serpapi.com/google-jobs-api
+    Each call costs 1 search credit.
     """
-    jobs      = []
-    encoded   = search_query.replace(" ", "+")
-    url       = f"https://www.google.com/search?q={encoded}&ibp=htl;jobs&hl=en&gl=ae&tbs=qdr:w"
-    headers   = {
-        "User-Agent":      random.choice(USER_AGENTS),
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer":         "https://www.google.com/",
-    }
+    jobs = []
+
+    if not SERPAPI_KEY:
+        print(f"  ❌ SERPAPI_KEY not set — skipping {query_label}")
+        return jobs
 
     try:
-        with httpx.Client(follow_redirects=True, timeout=20) as http:
-            response = http.get(url, headers=headers)
+        # SerpAPI Google Jobs endpoint
+        # gl=ae = UAE, hl=en = English, chips=date_posted:week = last 7 days
+        params = {
+            "engine":      "google_jobs",
+            "q":           search_query,
+            "location":    "United Arab Emirates",
+            "gl":          "ae",
+            "hl":          "en",
+            "chips":       "date_posted:week",  # Last 7 days only
+            "num":         10,                  # Up to 10 results
+            "api_key":     SERPAPI_KEY,
+        }
+
+        response = requests.get(
+            "https://serpapi.com/search",
+            params=params,
+            timeout=30,
+        )
 
         if response.status_code != 200:
-            print(f"  ⚠ Google returned {response.status_code} for: {query_label}")
+            print(f"  ⚠ SerpAPI returned {response.status_code} for: {query_label}")
             return jobs
 
-        html = response.text
+        data = response.json()
 
-        # ── Parse job data from Google's JSON-LD or embedded data ────────
-        # Google embeds job data in script tags as JSON
-        # Try to extract structured job data first
-        json_matches = re.findall(
-            r'"jobTitle"\s*:\s*"([^"]+)".*?"employerName"\s*:\s*"([^"]+)"',
-            html, re.DOTALL
-        )
+        # Check for SerpAPI errors
+        if "error" in data:
+            print(f"  ❌ SerpAPI error for '{query_label}': {data['error']}")
+            return jobs
 
-        # Also try the standard Google Jobs card format in HTML
-        # Extract job blocks using pattern matching on the raw HTML
-        job_blocks = re.findall(
-            r'<div[^>]*class="[^"]*(?:iFjolb|PwjeAc|EimVGf)[^"]*"[^>]*>(.*?)</div>\s*</div>',
-            html, re.DOTALL
-        )
+        job_results = data.get("jobs_results", [])
 
-        # ── Method 1: Extract from JSON embedded in page ──────────────────
-        # Google Jobs embeds data as: {"jobTitle":"...","employerName":"...","jobLocation":"..."}
-        job_data_pattern = re.findall(
-            r'\{[^{}]*"jobTitle"\s*:\s*"([^"]+)"[^{}]*"employerName"\s*:\s*"([^"]+)"[^{}]*\}',
-            html
-        )
+        if not job_results:
+            print(f"  ⚠ No results from SerpAPI for: {query_label}")
+            return jobs
 
-        extracted = []
-
-        if job_data_pattern:
-            for title, company in job_data_pattern[:15]:
-                title   = title.strip()
-                company = company.strip()
-                if len(title) < 5 or len(company) < 2:
-                    continue
-                extracted.append({
-                    "title":       title,
-                    "company":     company,
-                    "location":    "UAE",
-                    "date_listed": "Recent",
-                    "link":        f"https://www.google.com/search?q={title.replace(' ', '+')}+{company.replace(' ', '+')}+UAE+job",
-                    "description": "",
-                })
-
-        # ── Method 2: Regex extraction from page text ─────────────────────
-        if not extracted:
-            # Strip HTML tags and extract text
-            clean = re.sub(r'<[^>]+>', '\n', html)
-            clean = re.sub(r'&amp;', '&', clean)
-            clean = re.sub(r'&nbsp;', ' ', clean)
-            clean = re.sub(r'&#\d+;', '', clean)
-            lines = [l.strip() for l in clean.split('\n') if l.strip() and len(l.strip()) > 3]
-
-            # Job title patterns common in Google Jobs results
-            title_pattern = re.compile(
-                r'^((?:Senior |Junior |Lead |Head of |Director of |VP |'
-                r'Assistant |Deputy )?'
-                r'(?:Area|Regional|Operations|Pharmacy|Retail|Cluster|'
-                r'Supply Chain|E-Commerce|Ecommerce|Omnichannel|District|'
-                r'Store|Branch|Division) Manager.*?)$',
-                re.IGNORECASE
-            )
-
-            seen_titles = set()
-            for i, line in enumerate(lines):
-                m = title_pattern.match(line)
-                if m and line not in seen_titles and len(line) < 100:
-                    seen_titles.add(line)
-                    title   = line
-                    company = lines[i + 1] if i + 1 < len(lines) else "Unknown"
-                    # Clean up company — skip if it looks like a location or date
-                    if re.search(r'^\d|ago$|Dubai|UAE|Abu Dhabi', company, re.I):
-                        company = "Unknown"
-
-                    location = "UAE"
-                    for j in range(i + 1, min(i + 6, len(lines))):
-                        loc_m = re.search(r'(Dubai|Abu Dhabi|Sharjah|Ajman|UAE|Ras Al Khaimah)', lines[j])
-                        if loc_m:
-                            location = loc_m.group(0)
-                            break
-
-                    date_listed = "Recent"
-                    for j in range(i + 1, min(i + 8, len(lines))):
-                        date_m = re.search(
-                            r'(\d+\s+(?:hour|day|week)s?\s+ago|today|just posted|posted \d)',
-                            lines[j], re.IGNORECASE
-                        )
-                        if date_m:
-                            date_listed = date_m.group(0)
-                            break
-
-                    extracted.append({
-                        "title":       title,
-                        "company":     company,
-                        "location":    location,
-                        "date_listed": date_listed,
-                        "link":        f"https://www.google.com/search?q={title.replace(' ', '+')}+{company.replace(' ', '+')}+UAE+jobs",
-                        "description": "",
-                    })
-
-                    if len(extracted) >= 15:
-                        break
-
-        # ── Method 3: Try known UAE job board results embedded in Google ──
-        # Google Jobs often shows results from Bayt, LinkedIn, Indeed in its panel
-        # These have structured URLs we can extract
-        bayt_links = re.findall(r'(https://www\.bayt\.com/[^\s"&>]+)', html)
-        indeed_links = re.findall(r'(https://ae\.indeed\.com/[^\s"&>]+)', html)
-        naukri_links = re.findall(r'(https://www\.naukrigulf\.com/[^\s"&>]+)', html)
-
-        all_links = list(set(bayt_links + indeed_links + naukri_links))[:10]
-
-        # If we got direct job board links, fetch them for better data
-        for link in all_links[:5]:
-            try:
-                with httpx.Client(follow_redirects=True, timeout=10) as http:
-                    r = http.get(link, headers=headers)
-                page_text = re.sub(r'<[^>]+>', '\n', r.text)
-                page_text = re.sub(r'\s+', ' ', page_text)
-
-                # Extract title from page
-                title_m = re.search(r'<title>([^<|–-]+)', r.text)
-                if title_m:
-                    title = title_m.group(1).strip()[:80]
-                    # Remove site name suffix
-                    title = re.sub(r'\s*[-|]\s*(?:Bayt|Indeed|Naukrigulf).*$', '', title, flags=re.I).strip()
-
-                    if len(title) > 5:
-                        location_m = re.search(r'(Dubai|Abu Dhabi|Sharjah|UAE)', page_text)
-                        date_m = re.search(r'(\d+ (?:day|hour|week)s? ago|today)', page_text, re.I)
-
-                        extracted.append({
-                            "title":       title,
-                            "company":     "Unknown",
-                            "location":    location_m.group(0) if location_m else "UAE",
-                            "date_listed": date_m.group(0) if date_m else "Recent",
-                            "link":        link,
-                            "description": page_text[:1500],
-                        })
-            except:
-                continue
-
-        # ── Deduplicate and build final job list ──────────────────────────
         count = 0
-        for job_data in extracted:
-            if count >= 10:
-                break
-
-            title   = job_data["title"].strip()
-            company = job_data["company"].strip()
+        for job_data in job_results[:10]:
+            title   = job_data.get("title", "").strip()
+            company = job_data.get("company_name", "Unknown").strip()
 
             if len(title) < 5:
                 continue
@@ -544,25 +419,56 @@ def fetch_google_jobs(query_label, search_query, seen_set):
                 print(f"    🚫 UAE National — {title[:45]}")
                 continue
 
+            # Location — SerpAPI returns detected_extensions.location or location field
+            location = job_data.get("location", "UAE")
+            if not location:
+                extensions = job_data.get("detected_extensions", {})
+                location   = extensions.get("location", "UAE")
+
+            # Date listed — SerpAPI returns detected_extensions.posted_at
+            extensions  = job_data.get("detected_extensions", {})
+            date_listed = extensions.get("posted_at", "Recent")
+
+            # Job description — SerpAPI returns description field
+            description = job_data.get("description", "")
+
+            # Apply link — SerpAPI returns apply_options list
+            link = ""
+            apply_options = job_data.get("apply_options", [])
+            if apply_options:
+                link = apply_options[0].get("link", "")
+            if not link:
+                # Fallback to share link
+                link = job_data.get("share_link", "")
+            if not link:
+                link = f"https://www.google.com/search?q={title.replace(' ', '+')}+{company.replace(' ', '+')}+UAE+jobs"
+
+            # Platform — which job board it came from
+            platform = "Google Jobs"
+            if apply_options:
+                source = apply_options[0].get("title", "")
+                if source:
+                    platform = source  # e.g. "LinkedIn", "Bayt", "Indeed"
+
             key         = f"{company.lower()}_{title.lower()}"
             seen_before = key in seen_set
 
             jobs.append({
                 "title":       title,
                 "company":     company,
-                "location":    job_data.get("location", "UAE"),
-                "date_listed": job_data.get("date_listed", "Recent"),
-                "link":        job_data.get("link", ""),
-                "platform":    "Google Jobs",
-                "description": job_data.get("description", ""),
+                "location":    location,
+                "date_listed": date_listed,
+                "link":        link,
+                "platform":    platform,
+                "description": description[:1500],
                 "seen_before": seen_before,
                 "query":       query_label,
             })
             count += 1
-            print(f"    📌 {title[:50]} — {company[:30]}")
+            print(f"    📌 {title[:50]} — {company[:30]} [{platform}]")
 
     except Exception as e:
-        print(f"  ❌ Error fetching Google Jobs for '{query_label}': {e}")
+        print(f"  ❌ SerpAPI error for '{query_label}': {e}")
 
     print(f"  ✅ {query_label}: {count} found")
     return jobs
@@ -683,9 +589,8 @@ def run(progress_callback=None):
                 seen_keys.add(key)
                 all_jobs.append(job)
 
-        # Polite delay between Google requests — critical
-        delay = random.uniform(6, 12)
-        time.sleep(delay)
+        # Small polite delay between SerpAPI calls
+        time.sleep(1)
 
     progress(f"📊 {len(all_jobs)} unique jobs found — analysing with AI...", 52)
 
