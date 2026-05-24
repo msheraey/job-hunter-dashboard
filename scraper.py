@@ -582,7 +582,9 @@ def run(progress_callback=None):
             if is_skip(job["title"]):
                 continue
             if flag == "hard_block":
-                print(f"  ⛔ BLOCKED — {job["title"][:50]} | reason: {job.get("reason","")[:60]}")
+                title_b  = job.get("title", "")[:50]
+                reason_b = job.get("reason", "")[:60]
+                print(f"  ⛔ BLOCKED — {title_b} | reason: {reason_b}")
                 blocked += 1
                 continue
             if apply_flag and score >= 50:
