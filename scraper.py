@@ -95,28 +95,43 @@ SKIP_KEYWORDS = [
 ]
 
 HARD_BLOCK = [
+    # Construction / fabrication
     "aluminium", "aluminum", "glazing", "facade", "fabrication",
-    "aquatic", "swimming", "swim", "lifeguard",
-    "restaurant manager", "chef", "culinary", "f&b manager",
+    # Aquatics
+    "aquatics", "swimming instructor", "swim coach", "lifeguard",
+    # F&B / hospitality
+    "restaurant manager", "f&b manager", "food and beverage",
+    "hotel manager", "chef", "culinary",
+    # Engineering
     "civil engineer", "mechanical engineer", "electrical engineer",
-    "construction manager", "contracting", "fitout",
-    "software engineer", "developer", "programmer", "devops",
+    "construction manager", "site engineer", "fitout manager",
+    # Software / IT
+    "software engineer", "software developer", "devops engineer",
+    "data scientist",
+    # Finance
     "investment banker", "wealth manager", "hedge fund",
-    "nurse manager", "doctor", "physician", "surgeon", "dentist",
-    "marine lubricant", "ship management", "maritime",
-    "real estate broker", "property consultant",
-    "hair stylist", "salon stylist",
+    # Clinical medical (not pharmacy management)
+    "head nurse", "nurse manager", "physician", "surgeon", "dentist",
+    "radiologist", "dermatologist",
+    # Marine / industrial
+    "marine engineer", "ship captain", "maritime manager",
+    "cnc operator", "machinist",
+    # Real estate
+    "real estate broker", "property consultant", "real estate agent",
+    # Beauty
+    "hair stylist", "salon manager", "beauty therapist",
 ]
 
 PARTIAL_FIT = [
-    "3pl manager", "third party logistics", "warehouse manager",
-    "distribution center manager", "dc manager",
+    "3pl manager", "third party logistics manager",
+    "warehouse manager", "distribution center manager",
 ]
 
 def is_skip(title):
     return any(kw in title.upper() for kw in SKIP_KEYWORDS)
 
 def pre_screen(title, company=""):
+    # Title only — not description (descriptions legitimately mention any industry)
     text = (title + " " + company).lower()
     for kw in HARD_BLOCK:
         if kw in text:
@@ -276,13 +291,13 @@ def fetch_jobs(query_label, search_query, site_name, site_domain, seen_set):
     try:
         params = {
             "engine":   "google_jobs",
-            "q":        search_query,          # Clean query — no site: filter (not supported by google_jobs)
+            "q":        search_query,
             "location": "United Arab Emirates",
             "gl":       "ae",
             "hl":       "en",
-            "chips":    "date_posted:week",   # Last 7 days
+            # No date filter — get all available results
+            # No num limit — get everything SerpAPI returns
             "api_key":  SERPAPI_KEY,
-            # No 'num' param — get all results in the time window
         }
 
         response = requests.get(
@@ -567,6 +582,7 @@ def run(progress_callback=None):
             if is_skip(job["title"]):
                 continue
             if flag == "hard_block":
+                print(f"  ⛔ BLOCKED — {job["title"][:50]} | reason: {job.get("reason","")[:60]}")
                 blocked += 1
                 continue
             if apply_flag and score >= 50:
