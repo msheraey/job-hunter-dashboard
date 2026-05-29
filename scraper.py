@@ -23,12 +23,17 @@ import requests
 
 # ── Config ────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GROQ_API_KEY      = os.environ.get("GROQ_API_KEY", "")
 TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 SHEET_ID          = os.environ.get("SHEET_ID", "")
 SERPAPI_KEY       = os.environ.get("SERPAPI_KEY", "")
 SHEET_NAME        = "Sheet1"
 TODAY             = date.today().strftime("%Y-%m-%d")
+
+# Primary scorer: Groq (free). Fallback: Claude Haiku (cheap, prompt-cached).
+GROQ_MODEL  = "llama-3.3-70b-versatile"
+USE_GROQ    = bool(GROQ_API_KEY)
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -249,6 +254,59 @@ CACHED_SYSTEM = (
 )
 
 
+def _parse_score_json(raw_text):
+    """Shared parser: strip code fences, load JSON, normalize fields."""
+    raw  = re.sub(r"```json|```", "", raw_text).strip()
+    # Some models prepend reasoning in <think> tags — keep only after </think>
+    if "<think>" in raw:
+        raw = raw.split("</think>")[-1].strip()
+    data = json.loads(raw)
+    score    = int(data.get("score", 0))
+    apply    = bool(data.get("apply", False))
+    reason   = str(data.get("reason", ""))
+    industry = str(data.get("industry", "General"))
+    flag     = str(data.get("flag", "none"))
+    if flag == "3pl_partial": score = min(score, 55); apply = False
+    if flag == "hard_block":  score = min(score, 15); apply = False
+    return score, apply, reason, industry, flag
+
+
+def _score_with_groq(job_content):
+    """Primary scorer — Groq (free). Returns parsed tuple or raises."""
+    resp = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}",
+                 "Content-Type": "application/json"},
+        json={
+            "model": GROQ_MODEL,
+            "max_tokens": 250,
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": CACHED_SYSTEM},
+                {"role": "user",   "content": job_content},
+            ],
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return _parse_score_json(resp.json()["choices"][0]["message"]["content"])
+
+
+def _score_with_haiku(job_content):
+    """Fallback scorer — Claude Haiku with prompt caching."""
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=200,
+        system=[{
+            "type":          "text",
+            "text":          CACHED_SYSTEM,
+            "cache_control": {"type": "ephemeral"},
+        }],
+        messages=[{"role": "user", "content": job_content}],
+    )
+    return _parse_score_json(msg.content[0].text)
+
+
 def match_job(title, company, location="", description="", date_listed=""):
     status, reason = pre_screen(title, company)
     if status == "block":
@@ -262,36 +320,30 @@ def match_job(title, company, location="", description="", date_listed=""):
         f"Description: {description[:1500] if description else 'Not provided'}"
     )
 
+    # Try Groq first (free) with retries, then fall back to Haiku.
+    if USE_GROQ:
+        for attempt in range(3):
+            try:
+                return _score_with_groq(job_content)
+            except (json.JSONDecodeError, KeyError):
+                # bad/garbled JSON from Groq — fall back to Haiku immediately
+                break
+            except requests.exceptions.HTTPError as e:
+                code = getattr(e.response, "status_code", None)
+                if code == 429 and attempt < 2:          # rate limited — back off
+                    time.sleep(2 * (2 ** attempt))
+                    continue
+                break                                     # other HTTP error — fall back
+            except Exception:
+                break                                     # network/other — fall back
+
+    # Fallback: Claude Haiku (also handles the no-Groq-key case)
     for attempt in range(5):
         try:
-            msg = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=200,
-                system=[{
-                    "type":          "text",
-                    "text":          CACHED_SYSTEM,
-                    "cache_control": {"type": "ephemeral"},
-                }],
-                messages=[{"role": "user", "content": job_content}],
-            )
-            raw  = re.sub(r"```json|```", "", msg.content[0].text).strip()
-            data = json.loads(raw)
-
-            score    = int(data.get("score", 0))
-            apply    = bool(data.get("apply", False))
-            reason   = str(data.get("reason", ""))
-            industry = str(data.get("industry", "General"))
-            flag     = str(data.get("flag", "none"))
-
-            if flag == "3pl_partial": score = min(score, 55); apply = False
-            if flag == "hard_block":  score = min(score, 15); apply = False
-
-            return score, apply, reason, industry, flag
-
+            return _score_with_haiku(job_content)
         except anthropic.RateLimitError:
-            wait = 2 * (2 ** attempt)
             if attempt < 4:
-                time.sleep(wait)
+                time.sleep(2 * (2 ** attempt))
             else:
                 return 0, False, "Rate limit exceeded", "Unknown", "none"
         except (json.JSONDecodeError, KeyError) as e:
