@@ -5,6 +5,7 @@ JobHunter Scraper v2 — Multi-user, on-demand pool architecture
 - Supabase for storage
 - On-demand scraping with 24h TTL cache
 - Shared title pool across all users
+- Trusted platforms whitelist only
 """
 
 import os
@@ -24,13 +25,14 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TTL_HOURS = 24  # re-scrape if older than this
 
-# ── Rejected aggregator domains ───────────────────────────────────────────
-REJECTED_DOMAINS = [
-    "jooble.org", "bebee.com", "jobsora.com", "careerjet.com",
-    "jobrapido.com", "neuvoo.com", "talent.com", "jobijoba.com",
-    "totaljobs.com", "ziprecruiter.com", "jobgurus.com", "laimoon.com",
-    "monsterindia.com", "nchsims.com", "jobzed.com", "trabajos.com",
-    "joblist.com", "jobsearch.com", "simplyhired.com", "jobvertise.com",
+# ── Trusted platforms — whitelist only ────────────────────────────────────
+TRUSTED_DOMAINS = [
+    "linkedin.com",
+    "indeed.com",
+    "bayt.com",
+    "naukrigulf.com",
+    "gulftalent.com",
+    "gofindit.com",
 ]
 
 # ── Junk title filter ─────────────────────────────────────────────────────
@@ -184,7 +186,7 @@ def get_description(item):
     return str(desc)[:1500]
 
 def save_jobs(keyword, items):
-    """Save scraped jobs to pool, skip duplicates and junk"""
+    """Save scraped jobs to pool — trusted platforms only, no duplicates"""
     normalized = normalize_title(keyword)
     saved = 0
 
@@ -202,16 +204,14 @@ def save_jobs(keyword, items):
         if is_junk(title) or is_skip(title) or len(title) < 5:
             continue
 
-        # Get link from source_url
+        # Only accept trusted platforms — whitelist
         link = item.get("source_url", "")
         platform = item.get("source_name", "Google Jobs")
 
-        # Skip missing or invalid links
         if not link or not link.startswith("http"):
             continue
 
-        # Skip junk aggregator sites
-        if any(d in link for d in REJECTED_DOMAINS):
+        if not any(d in link for d in TRUSTED_DOMAINS):
             continue
 
         # Skip duplicates
