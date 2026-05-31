@@ -1,0 +1,2 @@
+DATAFORSEO_LOGIN=m.sheraey@outlook.com
+DATAFORSEO_PASSWORD=0d7bd257f3b51c8a'
