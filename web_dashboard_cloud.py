@@ -93,7 +93,7 @@ def load_jobs():
                 continue
 
             link = cell(row, c_link, '#')
-            if not link.startswith('http'):   # reject emoji / empty / relative values
+            if not link.startswith('http'):
                 link = '#'
 
             score_raw = cell(row, c_score, '0').replace('%', '').strip()
@@ -143,7 +143,7 @@ def update_job_status(row_num, status):
     """Update job status (Applied, Interview, Rejected)"""
     try:
         sheet = get_sheet()
-        sheet.update_cell(row_num + 2, 8, status)  # Column H is Status
+        sheet.update_cell(row_num + 2, 8, status)
         return True
     except Exception as e:
         print(f"Error updating status: {e}")
@@ -163,25 +163,21 @@ HTML_TEMPLATE = """
         
         .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
         
-        /* Header */
         .header { background: white; border-radius: 20px; padding: 30px; margin-bottom: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
         .header h1 { color: #333; margin-bottom: 10px; }
         .header p { color: #666; }
         
-        /* Stats */
         .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
         .stat-card { background: white; border-radius: 15px; padding: 25px; text-align: center; box-shadow: 0 5px 15px rgba(0,0,0,0.1); transition: transform 0.2s; }
         .stat-card:hover { transform: translateY(-5px); }
         .stat-card .number { font-size: 36px; font-weight: bold; color: #667eea; }
         .stat-card .label { color: #666; margin-top: 10px; }
         
-        /* Filters */
         .filters { background: white; border-radius: 15px; padding: 20px; margin-bottom: 30px; display: flex; gap: 15px; flex-wrap: wrap; align-items: center; }
         .filter-btn { padding: 10px 20px; border: 2px solid #e0e0e0; background: white; border-radius: 10px; cursor: pointer; transition: all 0.2s; }
         .filter-btn.active { background: #667eea; color: white; border-color: #667eea; }
         .filter-btn:hover { border-color: #667eea; }
         
-        /* Job Table */
         .job-table { background: white; border-radius: 20px; overflow: hidden; box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
         table { width: 100%; border-collapse: collapse; }
         th { background: #667eea; color: white; padding: 15px; text-align: left; font-weight: 600; }
@@ -214,7 +210,6 @@ HTML_TEMPLATE = """
         .search-bar input { flex: 1; padding: 12px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 16px; }
         .search-bar button { padding: 12px 24px; background: #667eea; color: white; border: none; border-radius: 10px; cursor: pointer; }
         
-        /* Progress Bar */
         .progress-wrap { display: none; margin-top: 18px; }
         .progress-meta { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
         .progress-step { color: #555; font-size: 14px; flex: 1; }
@@ -337,7 +332,7 @@ HTML_TEMPLATE = """
                 <button onclick="confirmGenerate()" class="btn btn-success">Generate</button>
             </div>
             <div id="cvProgress" style="display: none; margin-top: 20px; text-align: center;">
-                ⏳ Generating... Check your Telegram in 30-60 seconds
+                ⏳ Generating... Check your email in 30-60 seconds
             </div>
         </div>
     </div>
@@ -404,7 +399,7 @@ HTML_TEMPLATE = """
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    alert('✅ CV generation started! Check your Telegram.');
+                    alert('✅ CV generation started! Check your email.');
                     closeModal();
                 } else {
                     alert('Error: ' + data.error);
@@ -474,7 +469,6 @@ HTML_TEMPLATE = """
             }, 3000);
         }
 
-        // Restore progress bar if scraper is already running on page load
         fetch('/scraper-status').then(r => r.json()).then(data => {
             if (data.running) {
                 const btn = document.getElementById('scraperBtn');
@@ -566,7 +560,6 @@ def generate_cv():
 
     def run_generation():
         try:
-            # 1. Fetch the actual job page for better tailoring
             job_desc = ""
             job_link = job.get('link', '#')
             if job_link and job_link.startswith('http'):
@@ -583,7 +576,6 @@ def generate_cv():
                 except Exception as fe:
                     print(f"CV: could not fetch job URL: {fe}")
 
-            # 2. Generate with Claude
             job_desc_section = ("FULL JOB DESCRIPTION:\n" + job_desc + "\n") if job_desc else ""
             prompt = (
                 "You are a professional CV writer. Create tailored application materials.\n\n"
@@ -610,34 +602,12 @@ def generate_cv():
             )
             content = msg.content[0].text
 
-            # 3. Send to Telegram (split at 3800 chars to stay under 4096 limit)
-            header = (
-                f"📄 <b>CV &amp; Cover Letter</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"📋 <b>{job.get('title','')}</b>\n"
-                f"🏢 <b>{job.get('company','')}</b>\n"
-                f"💰 {job.get('salary','TBD')} · {job.get('platform','')}\n"
-                f"🔗 <a href='{job.get('link','#')}'>View Job Posting</a>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            )
-            full_text = header + content
-            for i in range(0, len(full_text), 3800):
-                requests.post(
-                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                    json={"chat_id": TELEGRAM_CHAT_ID,
-                          "text": full_text[i:i + 3800],
-                          "parse_mode": "HTML",
-                          "disable_web_page_preview": True},
-                    timeout=30
-                )
+            # Send via email (placeholder — email integration to be added in next phase)
+            print(f"CV generated for {job.get('title')} at {job.get('company')}:")
+            print(content[:500])
+
         except Exception as e:
             print(f"CV generation error: {e}")
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": TELEGRAM_CHAT_ID,
-                      "text": f"❌ CV generation failed: {str(e)[:300]}"},
-                timeout=10
-            )
 
     threading.Thread(target=run_generation, daemon=True).start()
     return jsonify({'success': True})
@@ -646,7 +616,7 @@ def generate_cv():
 def trigger_scraper():
     global scraper_status
     if scraper_status["running"]:
-        return jsonify({'success': False, 'error': 'Scraper is already running. Check Telegram for updates.'})
+        return jsonify({'success': False, 'error': 'Scraper is already running.'})
 
     def run_scraper_thread():
         global scraper_status
@@ -668,13 +638,6 @@ def trigger_scraper():
         except Exception as e:
             scraper_status["last_result"] = f"❌ Error: {str(e)}"
             scraper_status["step"] = f"❌ Error: {str(e)[:80]}"
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": TELEGRAM_CHAT_ID,
-                      "text": f"❌ Scraper error: {str(e)[:300]}",
-                      "parse_mode": "HTML"},
-                timeout=10
-            )
         finally:
             scraper_status["running"] = False
 
@@ -697,14 +660,84 @@ def update_status():
         all_values = sheet.get_all_values()
         job_link = job.get('link', '')
 
-        for i, row in enumerate(all_values[1:], start=1):  # skip header row
-            if len(row) >= 7 and row[6] == job_link:  # column G (index 6) is Link
-                sheet.update_cell(i + 1, 8, status)   # column 8 = Status
+        for i, row in enumerate(all_values[1:], start=1):
+            if len(row) >= 7 and row[6] == job_link:
+                sheet.update_cell(i + 1, 8, status)
                 return jsonify({'success': True})
 
         return jsonify({'success': False, 'error': 'Job not found in sheet'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/health')
+def health():
+    return jsonify({'status': 'ok', 'timestamp': datetime.now().isoformat()})
+
+# ── DataForSEO Test Route ─────────────────────────────────────────────────
+@app.route('/test-dataforseo')
+def test_dataforseo():
+    LOGIN = os.environ.get("DATAFORSEO_LOGIN")
+    PASSWORD = os.environ.get("DATAFORSEO_PASSWORD")
+
+    if not LOGIN or not PASSWORD:
+        return jsonify({'status': 'error', 'message': 'DATAFORSEO_LOGIN or DATAFORSEO_PASSWORD not set in environment variables'})
+
+    url = "https://api.dataforseo.com/v3/serp/google/jobs/live/advanced"
+
+    payload = [{
+        "keyword": "pharmacy manager UAE",
+        "location_name": "United Arab Emirates",
+        "language_name": "English",
+        "device": "desktop",
+        "os": "windows"
+    }]
+
+    try:
+        response = requests.post(
+            url,
+            auth=(LOGIN, PASSWORD),
+            json=payload,
+            timeout=30
+        )
+
+        data = response.json()
+
+        if response.status_code != 200:
+            return jsonify({'status': 'error', 'http_code': response.status_code, 'data': data})
+
+        tasks = data.get("tasks", [])
+        if not tasks:
+            return jsonify({'status': 'error', 'message': 'No tasks returned', 'data': data})
+
+        task = tasks[0]
+        status_code = task.get("status_code")
+
+        if status_code != 20000:
+            return jsonify({'status': 'error', 'status_code': status_code, 'message': task.get("status_message"), 'data': task})
+
+        result = task.get("result", [])
+        if not result:
+            return jsonify({'status': 'connected', 'message': 'API working but no results for this query'})
+
+        items = result[0].get("items", [])
+        sample = []
+        for job in items[:5]:
+            sample.append({
+                "title": job.get("title"),
+                "company": job.get("employer_name"),
+                "location": job.get("location"),
+                "posted": job.get("timestamp")
+            })
+
+        return jsonify({
+            'status': 'success',
+            'message': f'DataForSEO connected successfully',
+            'total_jobs_found': len(items),
+            'sample': sample
+        })
+
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
