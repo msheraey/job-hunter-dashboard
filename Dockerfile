@@ -9,4 +9,4 @@ COPY . .
 
 EXPOSE 8080
 
-CMD ["python", "-c", "import web_dashboard_cloud; print('Import OK')"]
+CMD ["python", "test.py"]
