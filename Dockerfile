@@ -9,4 +9,4 @@ COPY . .
 
 EXPOSE 8080
 
-CMD ["python", "test.py"]
+CMD ["gunicorn", "-w", "1", "--timeout", "120", "--log-level", "debug", "-b", "0.0.0.0:8080", "web_dashboard_cloud:app"]
