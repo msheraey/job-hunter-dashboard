@@ -676,6 +676,7 @@ def health():
 # ── DataForSEO Test Route ─────────────────────────────────────────────────
 @app.route('/test-dataforseo')
 def test_dataforseo():
+    import time
     LOGIN = os.environ.get("DATAFORSEO_LOGIN")
     PASSWORD = os.environ.get("DATAFORSEO_PASSWORD")
 
@@ -683,7 +684,6 @@ def test_dataforseo():
         return jsonify({'status': 'error', 'message': 'Credentials not set'})
 
     try:
-        # Step 1: POST the task
         post_response = requests.post(
             "https://api.dataforseo.com/v3/serp/google/jobs/task_post",
             auth=(LOGIN, PASSWORD),
@@ -695,7 +695,6 @@ def test_dataforseo():
             }],
             timeout=30
         )
-
         post_data = post_response.json()
         tasks = post_data.get("tasks", [])
 
@@ -703,9 +702,6 @@ def test_dataforseo():
             return jsonify({'status': 'error', 'step': 'task_post', 'data': post_data})
 
         task_id = tasks[0].get("id")
-
-        # Step 2: Wait briefly then GET results
-        import time
         time.sleep(5)
 
         get_response = requests.get(
@@ -713,12 +709,11 @@ def test_dataforseo():
             auth=(LOGIN, PASSWORD),
             timeout=30
         )
-
         get_data = get_response.json()
         result_tasks = get_data.get("tasks", [])
 
         if not result_tasks or not result_tasks[0].get("result"):
-            return jsonify({'status': 'pending', 'message': 'Task created but results not ready yet — try again in 10 seconds', 'task_id': task_id})
+            return jsonify({'status': 'pending', 'message': 'Task created but results not ready yet', 'task_id': task_id})
 
         items = result_tasks[0]["result"][0].get("items", [])
         sample = []
@@ -730,15 +725,51 @@ def test_dataforseo():
                 "posted": job.get("timestamp")
             })
 
-        return jsonify({
-            'status': 'success',
-            'task_id': task_id,
-            'total_found': len(items),
-            'sample': sample
-        })
+        return jsonify({'status': 'success', 'task_id': task_id, 'total_found': len(items), 'sample': sample})
 
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
+
+# ── Debug Route — inspect raw DataForSEO response ─────────────────────────
+@app.route('/debug-dataforseo')
+def debug_dataforseo():
+    import time
+    LOGIN = os.environ.get("DATAFORSEO_LOGIN")
+    PASSWORD = os.environ.get("DATAFORSEO_PASSWORD")
+
+    try:
+        post_resp = requests.post(
+            "https://api.dataforseo.com/v3/serp/google/jobs/task_post",
+            auth=(LOGIN, PASSWORD),
+            json=[{
+                "keyword": "pharmacy manager UAE",
+                "location_name": "United Arab Emirates",
+                "language_name": "English",
+                "depth": 10
+            }],
+            timeout=30
+        )
+        task_id = post_resp.json()["tasks"][0]["id"]
+        time.sleep(5)
+
+        get_resp = requests.get(
+            f"https://api.dataforseo.com/v3/serp/google/jobs/task_get/advanced/{task_id}",
+            auth=(LOGIN, PASSWORD),
+            timeout=30
+        )
+        data = get_resp.json()
+
+        # Return just the first raw item so we can see all available fields
+        try:
+            first_item = data["tasks"][0]["result"][0]["items"][0]
+            return jsonify(first_item)
+        except:
+            return jsonify(data)
+
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
+
+# ── Scraper v2 Test Route ─────────────────────────────────────────────────
 @app.route('/test-scraper-v2')
 def test_scraper_v2():
     from scraper_v2 import search_jobs
@@ -752,4 +783,3 @@ def test_scraper_v2():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-    
