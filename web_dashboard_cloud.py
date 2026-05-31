@@ -680,46 +680,47 @@ def test_dataforseo():
     PASSWORD = os.environ.get("DATAFORSEO_PASSWORD")
 
     if not LOGIN or not PASSWORD:
-        return jsonify({'status': 'error', 'message': 'DATAFORSEO_LOGIN or DATAFORSEO_PASSWORD not set in environment variables'})
-
-    url = "https://api.dataforseo.com/v3/serp/google/jobs/live/advanced"
-
-    payload = [{
-        "keyword": "pharmacy manager UAE",
-        "location_name": "United Arab Emirates",
-        "language_name": "English",
-        "device": "desktop",
-        "os": "windows"
-    }]
+        return jsonify({'status': 'error', 'message': 'Credentials not set'})
 
     try:
-        response = requests.post(
-            url,
+        # Step 1: POST the task
+        post_response = requests.post(
+            "https://api.dataforseo.com/v3/serp/google/jobs/task_post",
             auth=(LOGIN, PASSWORD),
-            json=payload,
+            json=[{
+                "keyword": "pharmacy manager UAE",
+                "location_name": "United Arab Emirates",
+                "language_name": "English",
+                "depth": 10
+            }],
             timeout=30
         )
 
-        data = response.json()
+        post_data = post_response.json()
+        tasks = post_data.get("tasks", [])
 
-        if response.status_code != 200:
-            return jsonify({'status': 'error', 'http_code': response.status_code, 'data': data})
+        if not tasks or tasks[0].get("status_code") != 20000:
+            return jsonify({'status': 'error', 'step': 'task_post', 'data': post_data})
 
-        tasks = data.get("tasks", [])
-        if not tasks:
-            return jsonify({'status': 'error', 'message': 'No tasks returned', 'data': data})
+        task_id = tasks[0].get("id")
 
-        task = tasks[0]
-        status_code = task.get("status_code")
+        # Step 2: Wait briefly then GET results
+        import time
+        time.sleep(5)
 
-        if status_code != 20000:
-            return jsonify({'status': 'error', 'status_code': status_code, 'message': task.get("status_message"), 'data': task})
+        get_response = requests.get(
+            f"https://api.dataforseo.com/v3/serp/google/jobs/task_get/advanced/{task_id}",
+            auth=(LOGIN, PASSWORD),
+            timeout=30
+        )
 
-        result = task.get("result", [])
-        if not result:
-            return jsonify({'status': 'connected', 'message': 'API working but no results for this query'})
+        get_data = get_response.json()
+        result_tasks = get_data.get("tasks", [])
 
-        items = result[0].get("items", [])
+        if not result_tasks or not result_tasks[0].get("result"):
+            return jsonify({'status': 'pending', 'message': 'Task created but results not ready yet — try again in 10 seconds', 'task_id': task_id})
+
+        items = result_tasks[0]["result"][0].get("items", [])
         sample = []
         for job in items[:5]:
             sample.append({
@@ -731,8 +732,8 @@ def test_dataforseo():
 
         return jsonify({
             'status': 'success',
-            'message': f'DataForSEO connected successfully',
-            'total_jobs_found': len(items),
+            'task_id': task_id,
+            'total_found': len(items),
             'sample': sample
         })
 
