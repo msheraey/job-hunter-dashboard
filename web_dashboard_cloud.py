@@ -699,7 +699,7 @@ def test_dataforseo():
         post_data = post_response.json()
         tasks = post_data.get("tasks", [])
 
-        if not tasks or tasks[0].get("status_code") != 20000:
+        if not tasks or tasks[0].get("status_code") not in [20000, 20100]:
             return jsonify({'status': 'error', 'step': 'task_post', 'data': post_data})
 
         task_id = tasks[0].get("id")
