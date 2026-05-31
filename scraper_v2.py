@@ -54,6 +54,7 @@ def normalize_title(title):
     """Lowercase, strip extra spaces — for deduplication"""
     return re.sub(r'\s+', ' ', title.strip().lower())
 
+
 # ── DataForSEO ────────────────────────────────────────────────────────────
 def dataforseo_search(keyword):
     """
@@ -107,6 +108,7 @@ def dataforseo_search(keyword):
     except Exception as e:
         print(f"  ❌ DataForSEO error for '{keyword}': {e}")
         return []
+
 
 # ── Pool logic ────────────────────────────────────────────────────────────
 def is_fresh(last_scraped_str):
@@ -187,7 +189,7 @@ def save_jobs(keyword, items):
         if is_junk(title) or is_skip(title) or len(title) < 5:
             continue
 
-        # Find best link from apply options
+        # Find best link from apply options — prefer trusted domains
         link = ""
         platform = "Google Jobs"
         for opt in item.get("apply_options", []):
@@ -197,15 +199,27 @@ def save_jobs(keyword, items):
                 platform = opt.get("title", "Google Jobs")
                 break
 
-        # Fallback to share link
+        # Fallback 1: any apply option link
         if not link:
-            link = item.get("related_job_id", "") or item.get("job_id", "")
-            if not link:
-                continue
+            for opt in item.get("apply_options", []):
+                opt_link = opt.get("link", "")
+                if opt_link.startswith("http"):
+                    link = opt_link
+                    platform = opt.get("title", "Google Jobs")
+                    break
+
+        # Fallback 2: item url or share link
+        if not link:
+            link = item.get("url", "") or item.get("share_link", "")
+
+        # Skip if still no valid link
+        if not link or not link.startswith("http"):
+            continue
 
         if link in existing_links:
             continue
 
+        # Parse posted date
         try:
             posted_raw = item.get("timestamp")
             posted_at = None
@@ -216,6 +230,14 @@ def save_jobs(keyword, items):
         except:
             posted_at = None
 
+        # Get description
+        description = (
+            item.get("description") or
+            item.get("snippet") or
+            item.get("job_highlights", {}).get("Qualifications", [""])[0]
+            if isinstance(item.get("job_highlights"), dict) else ""
+        ) or ""
+
         supabase.table("job_pool").insert({
             "title": title[:200],
             "company": company[:100],
@@ -223,7 +245,7 @@ def save_jobs(keyword, items):
             "posted_at": posted_at,
             "link": link,
             "platform": platform,
-            "description": (item.get("description") or "")[:1500],
+            "description": str(description)[:1500],
             "search_keyword": normalized,
             "last_scraped": datetime.now(timezone.utc).isoformat(),
         }).execute()
@@ -239,6 +261,7 @@ def save_jobs(keyword, items):
 
     print(f"  💾 Saved {saved} new jobs for '{keyword}'")
     return saved
+
 
 # ── Main entry point ──────────────────────────────────────────────────────
 def search_jobs(keyword):
@@ -277,4 +300,4 @@ if __name__ == "__main__":
     print(f"\n{'='*50}")
     print(f"Total jobs returned: {len(jobs)}")
     for j in jobs[:3]:
-        print(f"  - {j['title']} @ {j['company']} ({j['location']})")
+        print(f"  - {j['title']} @ {j['company']} ({j['location']}) — {j['link'][:60]}")
