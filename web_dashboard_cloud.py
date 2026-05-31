@@ -6,7 +6,6 @@ Deployable to Railway
 """
 
 import os
-import json
 import threading
 from datetime import datetime
 from flask import Flask, render_template_string, request, jsonify
@@ -49,20 +48,9 @@ HTML_TEMPLATE = """
         th { background: #667eea; color: white; padding: 15px; text-align: left; font-weight: 600; }
         td { padding: 15px; border-bottom: 1px solid #f0f0f0; }
         tr:hover { background: #f8f9ff; }
-        .score { font-weight: bold; }
-        .score-high { color: #10b981; }
-        .score-mid { color: #f59e0b; }
-        .score-low { color: #ef4444; }
-        .status-badge { display: inline-block; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
-        .status-new { background: #dbeafe; color: #2563eb; }
-        .status-applied { background: #d1fae5; color: #059669; }
-        .status-interview { background: #fef3c7; color: #d97706; }
-        .status-rejected { background: #fee2e2; color: #dc2626; }
         .btn { padding: 8px 16px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; transition: all 0.2s; margin: 0 5px; }
         .btn-primary { background: #667eea; color: white; }
         .btn-primary:hover { background: #5a67d8; }
-        .btn-success { background: #10b981; color: white; }
-        .btn-success:hover { background: #059669; }
         .search-bar { display: flex; gap: 10px; margin-bottom: 20px; }
         .search-bar input { flex: 1; padding: 12px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 16px; }
         .search-bar button { padding: 12px 24px; background: #667eea; color: white; border: none; border-radius: 10px; cursor: pointer; }
@@ -102,24 +90,24 @@ HTML_TEMPLATE = """
                 <div class="label">Total Jobs</div>
             </div>
             <div class="stat-card">
-                <div class="number">{{ stats.high_score }}</div>
-                <div class="label">80%+ Matches</div>
+                <div class="number">{{ stats.linkedin }}</div>
+                <div class="label">LinkedIn</div>
             </div>
             <div class="stat-card">
-                <div class="number">{{ stats.applied }}</div>
-                <div class="label">Applied</div>
+                <div class="number">{{ stats.indeed }}</div>
+                <div class="label">Indeed</div>
             </div>
             <div class="stat-card">
-                <div class="number">{{ stats.interview }}</div>
-                <div class="label">Interviews</div>
+                <div class="number">{{ stats.other }}</div>
+                <div class="label">Other Platforms</div>
             </div>
         </div>
 
         <div class="filters">
             <button class="filter-btn active" onclick="filterJobs('all')">All Jobs</button>
-            <button class="filter-btn" onclick="filterJobs('high')">80%+ Matches</button>
-            <button class="filter-btn" onclick="filterJobs('applied')">Applied</button>
-            <button class="filter-btn" onclick="filterJobs('new')">New</button>
+            <button class="filter-btn" onclick="filterJobs('linkedin')">LinkedIn</button>
+            <button class="filter-btn" onclick="filterJobs('indeed')">Indeed</button>
+            <button class="filter-btn" onclick="filterJobs('bayt')">Bayt</button>
         </div>
 
         <div class="search-bar">
@@ -132,9 +120,9 @@ HTML_TEMPLATE = """
                 <thead>
                     <tr>
                         <th>#</th>
-                        <th>Score</th>
                         <th>Job Title</th>
                         <th>Company</th>
+                        <th>Location</th>
                         <th>Platform</th>
                         <th>Posted</th>
                         <th>Salary</th>
@@ -143,12 +131,12 @@ HTML_TEMPLATE = """
                 </thead>
                 <tbody id="jobTableBody">
                     {% for job in jobs %}
-                    <tr data-score="{{ job.score }}" data-status="New" data-title="{{ job.title|lower }}" data-company="{{ job.company|lower }}">
+                    <tr data-platform="{{ job.platform|lower }}" data-title="{{ job.title|lower }}" data-company="{{ job.company|lower }}">
                         <td>{{ loop.index }}</td>
-                        <td class="score score-mid">—</td>
                         <td><a href="{{ job.link }}" target="_blank" style="color: #667eea; text-decoration: none;">{{ job.title[:60] }}{% if job.title|length > 60 %}...{% endif %}</a></td>
                         <td>{{ job.company[:40] }}</td>
-                        <td>{{ job.platform }}</td>
+                        <td style="font-size:13px; color:#555;">{{ job.location or 'UAE' }}</td>
+                        <td style="font-size:13px;">{{ job.platform }}</td>
                         <td style="color:#888; font-size:13px;">{{ job.posted_at[:10] if job.posted_at else '—' }}</td>
                         <td style="font-size:13px;">{{ job.salary or '—' }}</td>
                         <td>
@@ -165,12 +153,9 @@ HTML_TEMPLATE = """
         function filterJobs(type) {
             const rows = document.querySelectorAll('#jobTableBody tr');
             rows.forEach(row => {
-                const score = parseInt(row.dataset.score);
-                const status = row.dataset.status;
+                const platform = row.dataset.platform;
                 if (type === 'all') row.style.display = '';
-                else if (type === 'high') row.style.display = score >= 80 ? '' : 'none';
-                else if (type === 'applied') row.style.display = status === 'Applied' ? '' : 'none';
-                else if (type === 'new') row.style.display = status === 'New' ? '' : 'none';
+                else row.style.display = platform.includes(type) ? '' : 'none';
             });
             document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
             event.target.classList.add('active');
@@ -267,7 +252,7 @@ def load_jobs():
         result = supabase.table("job_pool")\
             .select("*")\
             .order("last_scraped", desc=True)\
-            .limit(200)\
+            .limit(500)\
             .execute()
         return result.data or []
     except Exception as e:
@@ -279,9 +264,9 @@ def dashboard():
     jobs = load_jobs()
     stats = {
         'total': len(jobs),
-        'high_score': 0,
-        'applied': 0,
-        'interview': 0
+        'linkedin': len([j for j in jobs if 'linkedin' in (j.get('platform') or '').lower()]),
+        'indeed': len([j for j in jobs if 'indeed' in (j.get('platform') or '').lower()]),
+        'other': len([j for j in jobs if 'linkedin' not in (j.get('platform') or '').lower() and 'indeed' not in (j.get('platform') or '').lower()])
     }
     return render_template_string(HTML_TEMPLATE, jobs=jobs, stats=stats)
 

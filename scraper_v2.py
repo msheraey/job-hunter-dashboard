@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
 """
 JobHunter Scraper v2 — Multi-user, on-demand pool architecture
-- DataForSEO Google Jobs API
+- Serper.dev Google Jobs API (single call, instant results)
 - Supabase for storage
 - On-demand scraping with 24h TTL cache
-- Shared title pool across all users
 - Trusted platforms whitelist only
 """
 
 import os
 import re
-import time
 import requests
 from datetime import datetime, timezone, timedelta
 from supabase import create_client
 
 # ── Config ────────────────────────────────────────────────────────────────
-DATAFORSEO_LOGIN    = os.environ.get("DATAFORSEO_LOGIN")
-DATAFORSEO_PASSWORD = os.environ.get("DATAFORSEO_PASSWORD")
-SUPABASE_URL        = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY        = os.environ.get("SUPABASE_KEY")
+SERPER_API_KEY  = os.environ.get("SERPER_API_KEY")
+SUPABASE_URL    = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY    = os.environ.get("SUPABASE_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-TTL_HOURS = 24  # re-scrape if older than this
+TTL_HOURS = 24
 
 # ── Trusted platforms — whitelist only ────────────────────────────────────
 TRUSTED_DOMAINS = [
@@ -56,68 +53,49 @@ def is_skip(title):
     return any(kw in title.upper() for kw in SKIP_KEYWORDS)
 
 def normalize_title(title):
-    """Lowercase, strip extra spaces — for deduplication"""
     return re.sub(r'\s+', ' ', title.strip().lower())
 
 
-# ── DataForSEO ────────────────────────────────────────────────────────────
-def dataforseo_search(keyword):
+# ── Serper Search ─────────────────────────────────────────────────────────
+def serper_search(keyword):
     """
-    Two-step DataForSEO call:
-    1. POST task
-    2. Wait 10s then GET results
+    Single Serper.dev API call — instant results, no waiting.
     Returns list of raw job dicts or empty list on failure.
     """
     try:
-        # Step 1: Post task
-        post_resp = requests.post(
-            "https://api.dataforseo.com/v3/serp/google/jobs/task_post",
-            auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
-            json=[{
-                "keyword": keyword,
-                "location_name": "United Arab Emirates",
-                "language_name": "English",
-                "depth": 100
-            }],
+        response = requests.post(
+            "https://google.serper.dev/search",
+            headers={
+                "X-API-KEY": SERPER_API_KEY,
+                "Content-Type": "application/json"
+            },
+            json={
+                "q": keyword,
+                "type": "jobs",
+                "location": "United Arab Emirates",
+                "gl": "ae",
+                "hl": "en",
+                "num": 100
+            },
             timeout=30
         )
-        post_data = post_resp.json()
-        tasks = post_data.get("tasks", [])
 
-        if not tasks or tasks[0].get("status_code") not in [20000, 20100]:
-            print(f"  task_post failed for '{keyword}': {post_data}")
+        if response.status_code != 200:
+            print(f"  Serper error {response.status_code} for '{keyword}'")
             return []
 
-        task_id = tasks[0].get("id")
-        print(f"  Task created: {task_id}")
-
-        # Step 2: Wait then fetch
-        time.sleep(10)
-
-        get_resp = requests.get(
-            f"https://api.dataforseo.com/v3/serp/google/jobs/task_get/advanced/{task_id}",
-            auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
-            timeout=30
-        )
-        get_data = get_resp.json()
-        result_tasks = get_data.get("tasks", [])
-
-        if not result_tasks or not result_tasks[0].get("result"):
-            print(f"  No results yet for task {task_id}")
-            return []
-
-        items = result_tasks[0]["result"][0].get("items", [])
-        print(f"  Found {len(items)} jobs for '{keyword}'")
-        return items
+        data = response.json()
+        jobs = data.get("jobs", [])
+        print(f"  Found {len(jobs)} jobs for '{keyword}'")
+        return jobs
 
     except Exception as e:
-        print(f"  DataForSEO error for '{keyword}': {e}")
+        print(f"  Serper error for '{keyword}': {e}")
         return []
 
 
 # ── Pool logic ────────────────────────────────────────────────────────────
 def is_fresh(last_scraped_str):
-    """Returns True if last_scraped is within TTL_HOURS"""
     if not last_scraped_str:
         return False
     try:
@@ -127,13 +105,7 @@ def is_fresh(last_scraped_str):
         return False
 
 def get_or_create_title(keyword):
-    """
-    Check if title exists in pool.
-    If not, create it.
-    Returns (title_record, is_new)
-    """
     normalized = normalize_title(keyword)
-
     result = supabase.table("title_pool")\
         .select("*")\
         .eq("normalized", normalized)\
@@ -151,7 +123,6 @@ def get_or_create_title(keyword):
     return insert.data[0], True
 
 def increment_request_count(title_id):
-    """Bump request count for a title"""
     record = supabase.table("title_pool")\
         .select("request_count")\
         .eq("id", title_id)\
@@ -165,7 +136,6 @@ def increment_request_count(title_id):
             .execute()
 
 def get_cached_jobs(keyword):
-    """Get jobs from pool for this keyword"""
     normalized = normalize_title(keyword)
     result = supabase.table("job_pool")\
         .select("*")\
@@ -174,23 +144,10 @@ def get_cached_jobs(keyword):
         .execute()
     return result.data or []
 
-def get_description(item):
-    """Safely extract description from item"""
-    desc = item.get("description") or item.get("snippet") or ""
-    if not desc:
-        highlights = item.get("job_highlights")
-        if isinstance(highlights, dict):
-            quals = highlights.get("Qualifications", [])
-            if quals and isinstance(quals, list):
-                desc = quals[0]
-    return str(desc)[:1500]
-
 def save_jobs(keyword, items):
-    """Save scraped jobs to pool — trusted platforms only, no duplicates"""
     normalized = normalize_title(keyword)
     saved = 0
 
-    # Get existing links to avoid duplicates
     existing = supabase.table("job_pool")\
         .select("link")\
         .eq("search_keyword", normalized)\
@@ -199,32 +156,31 @@ def save_jobs(keyword, items):
 
     for item in items:
         title = item.get("title", "").strip()
-        company = item.get("employer_name", "Unknown").strip()
+        company = item.get("company", "Unknown").strip()
 
         if is_junk(title) or is_skip(title) or len(title) < 5:
             continue
 
-        # Only accept trusted platforms — whitelist
-        link = item.get("source_url", "")
-        platform = item.get("source_name", "Google Jobs")
+        # Serper returns link directly
+        link = item.get("link", "")
 
         if not link or not link.startswith("http"):
             continue
 
+        # Trusted platforms only
         if not any(d in link for d in TRUSTED_DOMAINS):
             continue
 
-        # Skip duplicates
         if link in existing_links:
             continue
 
         # Parse posted date
         posted_at = None
         try:
-            posted_raw = item.get("timestamp")
+            posted_raw = item.get("datePosted") or item.get("date")
             if posted_raw:
                 posted_at = datetime.fromisoformat(
-                    posted_raw.replace(" +00:00", "+00:00")
+                    posted_raw.replace("Z", "+00:00")
                 ).isoformat()
         except Exception:
             posted_at = None
@@ -235,9 +191,9 @@ def save_jobs(keyword, items):
             "location": item.get("location", "UAE"),
             "posted_at": posted_at,
             "link": link,
-            "platform": platform,
+            "platform": item.get("source", "Google Jobs"),
             "salary": item.get("salary", ""),
-            "description": get_description(item),
+            "description": str(item.get("description") or "")[:1500],
             "search_keyword": normalized,
             "last_scraped": datetime.now(timezone.utc).isoformat(),
         }).execute()
@@ -245,7 +201,6 @@ def save_jobs(keyword, items):
         existing_links.add(link)
         saved += 1
 
-    # Update last_scraped on title_pool
     supabase.table("title_pool")\
         .update({"last_scraped": datetime.now(timezone.utc).isoformat()})\
         .eq("normalized", normalized)\
@@ -259,9 +214,9 @@ def save_jobs(keyword, items):
 def search_jobs(keyword):
     """
     Main function: given a keyword, return jobs.
-    - Checks pool first
-    - If fresh (<24h), returns cached results
-    - If stale or new, scrapes DataForSEO and saves to pool
+    - Checks pool first (24h TTL)
+    - If fresh, returns cached results
+    - If stale or new, scrapes Serper and saves to pool
     """
     print(f"\nSearching: '{keyword}'")
 
@@ -277,8 +232,8 @@ def search_jobs(keyword):
         print(f"  Cache hit — last scraped {last_scraped}")
         return get_cached_jobs(keyword)
 
-    print(f"  Cache miss — scraping DataForSEO...")
-    items = dataforseo_search(keyword)
+    print(f"  Cache miss — scraping Serper...")
+    items = serper_search(keyword)
 
     if items:
         save_jobs(keyword, items)
