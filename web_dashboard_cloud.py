@@ -311,34 +311,6 @@ def trigger_scraper():
     threading.Thread(target=run_scraper_thread, daemon=True).start()
     return jsonify({'success': True, 'message': 'Scraper started!'})
 
-@app.route('/scraper-status')
-def get_scraper_status():
-    return jsonify(scraper_status)
-
-@app.route('/health')
-def health():
-    return jsonify({'status': 'ok', 'timestamp': datetime.now().isoformat()})
-@app.route('/test-serper')
-def test_serper():
-    import requests as req
-    SERPER_API_KEY = os.environ.get("SERPER_API_KEY")
-    response = req.post(
-        "https://google.serper.dev/search",
-        headers={
-            "X-API-KEY": SERPER_API_KEY,
-            "Content-Type": "application/json"
-        },
-        json={
-            "q": "pharmacy manager UAE",
-            "type": "jobs",
-            "gl": "ae",
-            "hl": "en",
-            "num": 10
-        },
-        timeout=30
-    )
-    return jsonify(response.json())
-    
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
