@@ -87,7 +87,7 @@ def dataforseo_search(keyword):
         print(f"  ✅ Task created: {task_id}")
 
         # Step 2: Wait then fetch
-        time.sleep(5)
+        time.sleep(10)
 
         get_resp = requests.get(
             f"https://api.dataforseo.com/v3/serp/google/jobs/task_get/advanced/{task_id}",
