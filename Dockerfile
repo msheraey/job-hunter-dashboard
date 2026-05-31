@@ -9,4 +9,4 @@ COPY . .
 
 EXPOSE 8080
 
-CMD ["gunicorn", "-w", "1", "--timeout", "300", "-b", "0.0.0.0:8080", "web_dashboard_cloud:app"]
+CMD ["python", "-c", "import web_dashboard_cloud; print('Import OK')"]
