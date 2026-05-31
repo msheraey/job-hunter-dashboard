@@ -77,7 +77,7 @@ def dataforseo_search(keyword):
                 "keyword": keyword,
                 "location_name": "United Arab Emirates",
                 "language_name": "English",
-                "depth": 10
+                "depth": 100
             }],
             timeout=30
         )
