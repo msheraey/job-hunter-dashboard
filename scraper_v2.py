@@ -189,30 +189,11 @@ def save_jobs(keyword, items):
         if is_junk(title) or is_skip(title) or len(title) < 5:
             continue
 
-        # Find best link from apply options — prefer trusted domains
-        link = ""
-        platform = "Google Jobs"
-        for opt in item.get("apply_options", []):
-            opt_link = opt.get("link", "")
-            if any(d in opt_link for d in TRUSTED_DOMAINS):
-                link = opt_link
-                platform = opt.get("title", "Google Jobs")
-                break
+        # Get link — DataForSEO returns it as source_url
+        link = item.get("source_url", "")
+        platform = item.get("source_name", "Google Jobs")
 
-        # Fallback 1: any apply option link
-        if not link:
-            for opt in item.get("apply_options", []):
-                opt_link = opt.get("link", "")
-                if opt_link.startswith("http"):
-                    link = opt_link
-                    platform = opt.get("title", "Google Jobs")
-                    break
-
-        # Fallback 2: item url or share link
-        if not link:
-            link = item.get("url", "") or item.get("share_link", "")
-
-        # Skip if still no valid link
+        # Skip if no valid link
         if not link or not link.startswith("http"):
             continue
 
@@ -245,6 +226,7 @@ def save_jobs(keyword, items):
             "posted_at": posted_at,
             "link": link,
             "platform": platform,
+            "salary": item.get("salary", ""),
             "description": str(description)[:1500],
             "search_keyword": normalized,
             "last_scraped": datetime.now(timezone.utc).isoformat(),
