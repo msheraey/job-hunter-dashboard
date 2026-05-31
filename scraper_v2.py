@@ -87,7 +87,7 @@ def dataforseo_search(keyword):
         print(f"  ✅ Task created: {task_id}")
 
         # Step 2: Wait then fetch
-        time.sleep(10)
+        time.sleep(5)
 
         get_resp = requests.get(
             f"https://api.dataforseo.com/v3/serp/google/jobs/task_get/advanced/{task_id}",
@@ -189,12 +189,23 @@ def save_jobs(keyword, items):
         if is_junk(title) or is_skip(title) or len(title) < 5:
             continue
 
-        # Get link — DataForSEO returns it as source_url
+        # Get link — prefer trusted domains, reject junk sites
         link = item.get("source_url", "")
         platform = item.get("source_name", "Google Jobs")
 
-        # Skip if no valid link
+        # Reject junk/low quality aggregator sites
+        REJECTED_DOMAINS = [
+            "jooble.org", "bebee.com", "jobsora.com", "careerjet.com",
+            "jobrapido.com", "neuvoo.com", "talent.com", "jobijoba.com",
+            "totaljobs.com", "ziprecruiter.com", "jobgurus.com", "laimoon.com",
+            "monsterindia.com", "nchsims.com", "jobzed.com", "trabajos.com",
+            "joblist.com", "jobsearch.com", "simplyhired.com", "jobvertise.com",
+        ]
+
         if not link or not link.startswith("http"):
+            continue
+
+        if any(d in link for d in REJECTED_DOMAINS):
             continue
 
         if link in existing_links:
