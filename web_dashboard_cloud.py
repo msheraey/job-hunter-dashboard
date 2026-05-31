@@ -739,7 +739,17 @@ def test_dataforseo():
 
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
+@app.route('/test-scraper-v2')
+def test_scraper_v2():
+    from scraper_v2 import search_jobs
+    jobs = search_jobs("pharmacy manager UAE")
+    return jsonify({
+        'status': 'success',
+        'count': len(jobs),
+        'sample': jobs[:3]
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+    
