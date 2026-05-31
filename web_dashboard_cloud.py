@@ -145,7 +145,7 @@ HTML_TEMPLATE = """
                     {% for job in jobs %}
                     <tr data-score="{{ job.score }}" data-status="New" data-title="{{ job.title|lower }}" data-company="{{ job.company|lower }}">
                         <td>{{ loop.index }}</td>
-                        <td class="score score-{% if job.score >= 80 %}high{% elif job.score >= 60 %}mid{% else %}low{% endif %}">{{ job.score }}%</td>
+                        <td class="score score-mid">—</td>
                         <td><a href="{{ job.link }}" target="_blank" style="color: #667eea; text-decoration: none;">{{ job.title[:60] }}{% if job.title|length > 60 %}...{% endif %}</a></td>
                         <td>{{ job.company[:40] }}</td>
                         <td>{{ job.platform }}</td>
@@ -279,7 +279,7 @@ def dashboard():
     jobs = load_jobs()
     stats = {
         'total': len(jobs),
-        'high_score': len([j for j in jobs if j.get('score', 0) >= 80]),
+        'high_score': 0,
         'applied': 0,
         'interview': 0
     }
