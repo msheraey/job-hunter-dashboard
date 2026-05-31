@@ -131,12 +131,12 @@ HTML_TEMPLATE = """
                 </thead>
                 <tbody id="jobTableBody">
                     {% for job in jobs %}
-                    <tr data-platform="{{ job.platform|lower }}" data-title="{{ job.title|lower }}" data-company="{{ job.company|lower }}">
+                    <tr data-platform="{{ (job.platform or '')|lower }}" data-title="{{ job.title|lower }}" data-company="{{ job.company|lower }}">
                         <td>{{ loop.index }}</td>
                         <td><a href="{{ job.link }}" target="_blank" style="color: #667eea; text-decoration: none;">{{ job.title[:60] }}{% if job.title|length > 60 %}...{% endif %}</a></td>
                         <td>{{ job.company[:40] }}</td>
                         <td style="font-size:13px; color:#555;">{{ job.location or 'UAE' }}</td>
-                        <td style="font-size:13px;">{{ job.platform }}</td>
+                        <td style="font-size:13px;">{{ job.platform or '—' }}</td>
                         <td style="color:#888; font-size:13px;">{{ job.posted_at[:10] if job.posted_at else '—' }}</td>
                         <td style="font-size:13px;">{{ job.salary or '—' }}</td>
                         <td>
@@ -310,6 +310,14 @@ def trigger_scraper():
 
     threading.Thread(target=run_scraper_thread, daemon=True).start()
     return jsonify({'success': True, 'message': 'Scraper started!'})
+
+@app.route('/scraper-status')
+def get_scraper_status():
+    return jsonify(scraper_status)
+
+@app.route('/health')
+def health():
+    return jsonify({'status': 'ok', 'timestamp': datetime.now().isoformat()})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
