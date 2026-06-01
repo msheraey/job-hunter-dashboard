@@ -522,14 +522,19 @@ def search_and_score_for_user(user, logger=None):
     titles = supabase.table("title_pool").select("keyword").in_("id", title_ids).execute()
 
     all_jobs = []
+    seen_links = set()
     for t in (titles.data or []):
         jobs = search_jobs(t["keyword"], user_gender=user_gender, logger=logger)
-        all_jobs.extend(jobs)
+        for j in jobs:
+            link = j.get("link", "")
+            if link and link not in seen_links:
+                seen_links.add(link)
+                all_jobs.append(j)
 
     if not all_jobs:
         return []
 
-    log(f"  🤖 Scoring {len(all_jobs)} jobs...")
+    log(f"  🤖 Scoring {len(all_jobs)} unique jobs (deduplicated)...")
     scored_jobs = score_jobs_for_user(all_jobs, user)
 
     matched = []
