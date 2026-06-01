@@ -511,7 +511,19 @@ def api_add_title():
         search_jobs(keyword, user_gender=gender)
     threading.Thread(target=background_scrape, daemon=True).start()
     return jsonify({"success": True, "title_id": title_record["id"]})
-
+@app.route('/api/test-db')
+def api_test_db():
+    try:
+        jobs = supabase.table("job_pool").select("id").limit(5).execute()
+        titles = supabase.table("title_pool").select("id").limit(5).execute()
+        return jsonify({
+            "jobs_count": len(jobs.data or []),
+            "titles_count": len(titles.data or []),
+            "supabase_url": SUPABASE_URL[:30] if SUPABASE_URL else "NOT SET",
+            "key_set": bool(SUPABASE_KEY)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
