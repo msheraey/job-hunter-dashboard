@@ -204,22 +204,28 @@ def dataforseo_search(keyword, logger=None):
         task_id = tasks[0].get("id")
         log(f"  ✅ Task created: {task_id} — waiting 10s...")
 
-        time.sleep(10)
+        # Retry fetching results — DataForSEO can take 10-30s
+        items = None
+        for attempt in range(5):
+            wait = 8 if attempt == 0 else 6
+            time.sleep(wait)
+            log(f"  📥 Fetching results (attempt {attempt + 1}/5)...")
+            get_resp = requests.get(
+                f"https://api.dataforseo.com/v3/serp/google/jobs/task_get/advanced/{task_id}",
+                auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
+                timeout=30
+            )
+            get_data = get_resp.json()
+            result_tasks = get_data.get("tasks", [])
+            if result_tasks and result_tasks[0].get("result"):
+                items = result_tasks[0]["result"][0].get("items", [])
+                break
+            log(f"  ⏳ Not ready yet, retrying...")
 
-        log(f"  📥 Fetching results...")
-        get_resp = requests.get(
-            f"https://api.dataforseo.com/v3/serp/google/jobs/task_get/advanced/{task_id}",
-            auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
-            timeout=30
-        )
-        get_data = get_resp.json()
-        result_tasks = get_data.get("tasks", [])
-
-        if not result_tasks or not result_tasks[0].get("result"):
-            log(f"  ⚠️ No results returned for task {task_id}")
+        if items is None:
+            log(f"  ⚠️ No results after 5 attempts for task {task_id}")
             return []
 
-        items = result_tasks[0]["result"][0].get("items", [])
         log(f"  📋 Got {len(items)} raw results")
         return items
 
