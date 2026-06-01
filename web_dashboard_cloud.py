@@ -9,8 +9,7 @@ app = Flask(__name__)
 from supabase import create_client
 supabase = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY"))
 
-@app.route('/')
-def dashboard():
+def build_dashboard_html():
     try:
         jobs = supabase.table("job_pool").select("*").order("created_at", desc=True).limit(200).execute().data or []
         titles = supabase.table("title_pool").select("*").order("request_count", desc=True).execute().data or []
@@ -21,73 +20,132 @@ def dashboard():
             logs = []
         today = datetime.now(timezone.utc).date().isoformat()
     except Exception as e:
-        return f"<h1>DB Error: {e}</h1>", 500
+        return "<h1>DB Error: " + str(e) + "</h1>"
 
-    jobs_html = ""
+    # Build jobs rows
+    rows = []
     for i, j in enumerate(jobs, 1):
-        score = j.get('score') or 0
-        score_badge = f'<span style="background:{"#dcfce7;color:#166534" if score>=80 else "#fef9c3;color:#854d0e" if score>=60 else "#fee2e2;color:#991b1b"};padding:2px 8px;border-radius:20px;font-size:12px;font-weight:600">{score}%</span>' if score else '<span style="color:#94a3b8">—</span>'
-        posted = (j.get('posted_at') or '')[:10] or '—'
-        jobs_html += f'<tr><td>{i}</td><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{j.get("title","")}</td><td>{j.get("company","")}</td><td>{j.get("location","UAE")}</td><td style="font-size:12px;color:#64748b">{j.get("platform","")}</td><td>{posted}</td><td>{j.get("salary") or "—"}</td><td>{score_badge}</td><td><a href="{j.get("link","#")}" target="_blank" style="background:#2563eb;color:white;padding:4px 10px;border-radius:6px;text-decoration:none;font-size:12px">View</a></td></tr>'
+        score = j.get("score") or 0
+        if score >= 80:
+            sbg = "#dcfce7;color:#166534"
+        elif score >= 60:
+            sbg = "#fef9c3;color:#854d0e"
+        else:
+            sbg = "#fee2e2;color:#991b1b"
+        score_html = '<span style="background:' + sbg + ';padding:2px 8px;border-radius:20px;font-size:12px;font-weight:600">' + str(score) + '%</span>' if score else '<span style="color:#94a3b8">&mdash;</span>'
+        posted = (j.get("posted_at") or "")[:10] or "&mdash;"
+        link = j.get("link") or "#"
+        rows.append(
+            "<tr><td>" + str(i) + "</td>"
+            + '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (j.get("title") or "") + "</td>"
+            + "<td>" + (j.get("company") or "") + "</td>"
+            + "<td>" + (j.get("location") or "UAE") + "</td>"
+            + '<td style="font-size:12px;color:#64748b">' + (j.get("platform") or "") + "</td>"
+            + "<td>" + posted + "</td>"
+            + "<td>" + (j.get("salary") or "&mdash;") + "</td>"
+            + "<td>" + score_html + "</td>"
+            + '<td><a href="' + link + '" target="_blank" style="background:#2563eb;color:white;padding:4px 10px;border-radius:6px;text-decoration:none;font-size:12px">View</a></td>'
+            + "</tr>"
+        )
+    jobs_html = "".join(rows) or '<tr><td colspan="9" style="text-align:center;padding:32px;color:#94a3b8">No jobs yet &mdash; run the scraper</td></tr>'
 
-    titles_html = ""
+    # Build titles rows
+    rows = []
     for i, t in enumerate(titles, 1):
-        ls = (t.get('last_scraped') or '')[:16].replace('T',' ')
-        status = '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:20px;font-size:12px">Fresh</span>' if (t.get('last_scraped') or '')[:10] == today else '<span style="background:#fef9c3;color:#854d0e;padding:2px 8px;border-radius:20px;font-size:12px">Stale</span>' if t.get('last_scraped') else '<span style="background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:20px;font-size:12px">Never</span>'
-        titles_html += f'<tr><td>{i}</td><td>{t.get("keyword","")}</td><td>{ls or "Never"}</td><td>{t.get("request_count",0)}</td><td>{status}</td></tr>'
+        ls = (t.get("last_scraped") or "")[:16].replace("T", " ")
+        ls_date = (t.get("last_scraped") or "")[:10]
+        if ls_date == today:
+            status = '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:20px;font-size:12px">Fresh</span>'
+        elif ls_date:
+            status = '<span style="background:#fef9c3;color:#854d0e;padding:2px 8px;border-radius:20px;font-size:12px">Stale</span>'
+        else:
+            status = '<span style="background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:20px;font-size:12px">Never</span>'
+        rows.append("<tr><td>" + str(i) + "</td><td>" + (t.get("keyword") or "") + "</td><td>" + (ls or "Never") + "</td><td>" + str(t.get("request_count") or 0) + "</td><td>" + status + "</td></tr>")
+    titles_html = "".join(rows) or '<tr><td colspan="5" style="text-align:center;padding:32px;color:#94a3b8">No titles yet</td></tr>'
 
-    users_html = ""
+    # Build users rows
+    rows = []
     for i, u in enumerate(users, 1):
-        users_html += f'<tr><td>{i}</td><td>{u.get("name","—")}</td><td>{u.get("email","")}</td><td>{u.get("gender","—")}</td><td>{"✓" if u.get("cv_text") else "✗"}</td><td>{(u.get("created_at") or "")[:10]}</td><td>{"✓" if u.get("is_active") else "✗"}</td></tr>'
+        rows.append(
+            "<tr><td>" + str(i) + "</td>"
+            + "<td>" + (u.get("name") or "&mdash;") + "</td>"
+            + "<td>" + (u.get("email") or "") + "</td>"
+            + "<td>" + (u.get("gender") or "&mdash;") + "</td>"
+            + "<td>" + ("&#10003;" if u.get("cv_text") else "&#10007;") + "</td>"
+            + "<td>" + (u.get("created_at") or "")[:10] + "</td>"
+            + "<td>" + ("&#10003;" if u.get("is_active") else "&#10007;") + "</td>"
+            + "</tr>"
+        )
+    users_html = "".join(rows) or '<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">No users yet</td></tr>'
 
-    logs_html = ""
+    # Build logs rows
+    rows = []
     for i, l in enumerate(logs, 1):
-        s = l.get('status','')
-        badge = f'<span style="background:{"#dcfce7;color:#166534" if s=="success" else "#fee2e2;color:#991b1b" if s=="error" else "#dbeafe;color:#1d4ed8"};padding:2px 8px;border-radius:20px;font-size:12px">{s}</span>'
-        logs_html += f'<tr><td>{i}</td><td>{(l.get("started_at") or "")[:16].replace("T"," ")}</td><td>{(l.get("finished_at") or "—")[:16].replace("T"," ")}</td><td>{badge}</td><td>{l.get("total_scraped",0)}</td><td>{l.get("total_saved",0)}</td><td><button onclick="showLog('" + l.get('id','') + "')" style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">View</button></td></tr>'
+        s = l.get("status") or ""
+        if s == "success":
+            bbg = "#dcfce7;color:#166534"
+        elif s == "error":
+            bbg = "#fee2e2;color:#991b1b"
+        else:
+            bbg = "#dbeafe;color:#1d4ed8"
+        badge = '<span style="background:' + bbg + ';padding:2px 8px;border-radius:20px;font-size:12px">' + s + "</span>"
+        lid = str(l.get("id") or "")
+        started = (l.get("started_at") or "")[:16].replace("T", " ")
+        finished = (l.get("finished_at") or "&mdash;")[:16].replace("T", " ")
+        view_btn = '<button onclick=\'showLog("' + lid + '")\' style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">View</button>'
+        rows.append(
+            "<tr><td>" + str(i) + "</td>"
+            + "<td>" + started + "</td>"
+            + "<td>" + finished + "</td>"
+            + "<td>" + badge + "</td>"
+            + "<td>" + str(l.get("total_scraped") or 0) + "</td>"
+            + "<td>" + str(l.get("total_saved") or 0) + "</td>"
+            + "<td>" + view_btn + "</td></tr>"
+        )
+    logs_html = "".join(rows) or '<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">No logs yet</td></tr>'
 
-    scraped_today = len([t for t in titles if (t.get("last_scraped","") or "")[:10] == today])
+    scraped_today = len([t for t in titles if (t.get("last_scraped") or "")[:10] == today])
 
-    html = f"""<!DOCTYPE html>
+    page = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>JobHunter Admin</title>
 <style>
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b}}
-.hdr{{background:linear-gradient(135deg,#1e40af,#3b82f6);color:white;padding:20px 32px;display:flex;justify-content:space-between;align-items:center}}
-.hdr h1{{font-size:22px;font-weight:700}}
-.wrap{{max-width:1200px;margin:0 auto;padding:24px 16px}}
-.stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;margin-bottom:24px}}
-.stat{{background:white;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
-.stat .v{{font-size:32px;font-weight:700;color:#1e40af}}
-.stat .l{{font-size:13px;color:#64748b;margin-top:4px}}
-.card{{background:white;border-radius:12px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:20px}}
-.tabs{{display:flex;gap:4px;margin-bottom:20px;border-bottom:2px solid #e2e8f0}}
-.tab{{padding:10px 20px;cursor:pointer;font-size:14px;font-weight:500;color:#64748b;border-bottom:2px solid transparent;margin-bottom:-2px}}
-.tab.on{{color:#2563eb;border-bottom-color:#2563eb}}
-.pane{{display:none}}.pane.on{{display:block}}
-table{{width:100%;border-collapse:collapse}}
-th{{text-align:left;font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;padding:8px 12px;border-bottom:2px solid #f1f5f9}}
-td{{padding:10px 12px;border-bottom:1px solid #f8fafc;font-size:14px}}
-tr:hover td{{background:#f8fafc}}
-.log-box{{background:#0f172a;color:#94a3b8;border-radius:8px;padding:16px;font-family:monospace;font-size:12px;max-height:400px;overflow-y:auto;margin-top:12px;white-space:pre-wrap;line-height:1.6}}
-.sp{{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:6px}}
-@keyframes spin{{to{{transform:rotate(360deg)}}}}
-input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px}}
-#msg{{margin-top:16px;font-size:14px;color:#64748b}}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b}
+.hdr{background:linear-gradient(135deg,#1e40af,#3b82f6);color:white;padding:20px 32px;display:flex;justify-content:space-between;align-items:center}
+.hdr h1{font-size:22px;font-weight:700}
+.wrap{max-width:1200px;margin:0 auto;padding:24px 16px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;margin-bottom:24px}
+.stat{background:white;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.stat .v{font-size:32px;font-weight:700;color:#1e40af}
+.stat .l{font-size:13px;color:#64748b;margin-top:4px}
+.card{background:white;border-radius:12px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:20px}
+.tabs{display:flex;gap:4px;margin-bottom:20px;border-bottom:2px solid #e2e8f0}
+.tab{padding:10px 20px;cursor:pointer;font-size:14px;font-weight:500;color:#64748b;border-bottom:2px solid transparent;margin-bottom:-2px}
+.tab.on{color:#2563eb;border-bottom-color:#2563eb}
+.pane{display:none}.pane.on{display:block}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;padding:8px 12px;border-bottom:2px solid #f1f5f9}
+td{padding:10px 12px;border-bottom:1px solid #f8fafc;font-size:14px}
+tr:hover td{background:#f8fafc}
+.log-box{background:#0f172a;color:#94a3b8;border-radius:8px;padding:16px;font-family:monospace;font-size:12px;max-height:400px;overflow-y:auto;margin-top:12px;white-space:pre-wrap;line-height:1.6}
+.sp{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes spin{to{transform:rotate(360deg)}}
+input,select{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px}
+#msg{margin-top:16px;font-size:14px;color:#64748b}
 </style></head>
 <body>
 <div class="hdr">
   <div><h1>JobHunter Admin</h1><small style="opacity:.8;font-size:13px">Backend dashboard</small></div>
-  <div style="text-align:right;font-size:13px;opacity:.9">{len(jobs)} jobs &middot; {len(titles)} titles &middot; {len(users)} users</div>
+  <div style="text-align:right;font-size:13px;opacity:.9">JOBCOUNT jobs &middot; TITLECOUNT titles &middot; USERCOUNT users</div>
 </div>
 <div class="wrap">
   <div class="stats">
-    <div class="stat"><div class="v">{len(jobs)}</div><div class="l">Jobs in Pool</div></div>
-    <div class="stat"><div class="v">{len(titles)}</div><div class="l">Active Titles</div></div>
-    <div class="stat"><div class="v">{len(users)}</div><div class="l">Users</div></div>
-    <div class="stat"><div class="v">{scraped_today}</div><div class="l">Scraped Today</div></div>
-    <div class="stat"><div class="v">{len(logs)}</div><div class="l">Scrape Runs</div></div>
+    <div class="stat"><div class="v">JOBCOUNT</div><div class="l">Jobs in Pool</div></div>
+    <div class="stat"><div class="v">TITLECOUNT</div><div class="l">Active Titles</div></div>
+    <div class="stat"><div class="v">USERCOUNT</div><div class="l">Users</div></div>
+    <div class="stat"><div class="v">TODAYCOUNT</div><div class="l">Scraped Today</div></div>
+    <div class="stat"><div class="v">LOGCOUNT</div><div class="l">Scrape Runs</div></div>
   </div>
   <div class="tabs">
     <div class="tab on" onclick="show('jobs',this)">Job Pool</div>
@@ -102,15 +160,15 @@ input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-s
       <select id="qp" onchange="filter()"><option value="">All Platforms</option><option>LinkedIn</option><option>Indeed</option><option>Bayt.com</option><option>Naukrigulf</option><option>GulfTalent.com</option></select>
     </div>
     <table id="jt"><thead><tr><th>#</th><th>Title</th><th>Company</th><th>Location</th><th>Platform</th><th>Posted</th><th>Salary</th><th>Score</th><th></th></tr></thead>
-    <tbody>{jobs_html or '<tr><td colspan="9" style="text-align:center;padding:32px;color:#94a3b8">No jobs yet — run the scraper</td></tr>'}</tbody></table>
+    <tbody>JOBSHTML</tbody></table>
   </div>
   <div id="titles" class="pane card">
     <table><thead><tr><th>#</th><th>Keyword</th><th>Last Scraped</th><th>Requests</th><th>Status</th></tr></thead>
-    <tbody>{titles_html or '<tr><td colspan="5" style="text-align:center;padding:32px;color:#94a3b8">No titles yet</td></tr>'}</tbody></table>
+    <tbody>TITLESHTML</tbody></table>
   </div>
   <div id="users" class="pane card">
     <table><thead><tr><th>#</th><th>Name</th><th>Email</th><th>Gender</th><th>CV</th><th>Joined</th><th>Active</th></tr></thead>
-    <tbody>{users_html or '<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">No users yet</td></tr>'}</tbody></table>
+    <tbody>USERSHTML</tbody></table>
   </div>
   <div id="scraper" class="pane card">
     <h2 style="margin-bottom:16px">Run Scraper</h2>
@@ -127,9 +185,9 @@ input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-s
       <button onclick="loadLogs()" style="background:#f1f5f9;color:#64748b;padding:6px 12px;border:none;border-radius:8px;cursor:pointer;font-size:13px">Refresh</button>
     </div>
     <table><thead><tr><th>#</th><th>Started</th><th>Finished</th><th>Status</th><th>Scraped</th><th>Saved</th><th></th></tr></thead>
-    <tbody id="lb">{logs_html or '<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">No logs yet</td></tr>'}</tbody></table>
-    <div id="ld" style="display:none">
-      <div style="display:flex;justify-content:space-between;margin-top:16px;margin-bottom:8px">
+    <tbody id="lb">LOGSHTML</tbody></table>
+    <div id="ld" style="display:none;margin-top:16px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px">
         <strong>Log Detail</strong>
         <button onclick="document.getElementById('ld').style.display='none'" style="background:#f1f5f9;border:none;padding:4px 10px;border-radius:6px;cursor:pointer">Close</button>
       </div>
@@ -138,71 +196,87 @@ input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-s
   </div>
 </div>
 <script>
-function show(id,el){{
-  document.querySelectorAll('.pane').forEach(function(p){{p.className='pane'}});
-  document.querySelectorAll('.tab').forEach(function(t){{t.className='tab'}});
+function show(id,el){
+  document.querySelectorAll('.pane').forEach(function(p){p.className='pane'});
+  document.querySelectorAll('.tab').forEach(function(t){t.className='tab'});
   document.getElementById(id).className='pane on';
   el.className='tab on';
   if(id==='logs') loadLogs();
-}}
-function filter(){{
+}
+function filter(){
   var q=document.getElementById('qs').value.toLowerCase();
   var p=document.getElementById('qp').value.toLowerCase();
-  document.querySelectorAll('#jt tbody tr').forEach(function(r){{
+  document.querySelectorAll('#jt tbody tr').forEach(function(r){
     var t=r.textContent.toLowerCase();
     r.style.display=(!q||t.indexOf(q)>-1)&&(!p||t.indexOf(p)>-1)?'':'none';
-  }});
-}}
-function setMsg(h){{var e=document.getElementById('msg');e.style.display='block';e.innerHTML=h;}}
-function runScraper(){{
+  });
+}
+function setMsg(h){var e=document.getElementById('msg');e.style.display='block';e.innerHTML=h;}
+function runScraper(){
   var b=document.getElementById('sb');
   b.disabled=true;b.innerHTML='<span class="sp"></span>Starting...';
-  setMsg('Scraper running in background — check Logs tab in 30 seconds...');
-  fetch('/api/run-scraper',{{method:'POST'}})
-    .then(function(r){{return r.json();}})
-    .then(function(){{b.disabled=false;b.innerHTML='&#9654; Run Scraper Now';setMsg('Started! <a href="#" onclick="show(\'logs\',document.querySelectorAll(\'.tab\')[4]);return false;">View Logs</a>');}})
-    .catch(function(e){{b.disabled=false;b.innerHTML='&#9654; Run Scraper Now';setMsg('Error: '+e);}});
-}}
-function runEmail(){{
+  setMsg('Scraper running in background...');
+  fetch('/api/run-scraper',{method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(){b.disabled=false;b.innerHTML='&#9654; Run Scraper Now';setMsg('Started! Check Logs tab in 30 seconds.');})
+    .catch(function(e){b.disabled=false;b.innerHTML='&#9654; Run Scraper Now';setMsg('Error: '+e);});
+}
+function runEmail(){
   var b=document.getElementById('eb');
   b.disabled=true;b.innerHTML='<span class="sp"></span>Processing...';
   setMsg('Scoring and emailing...');
-  fetch('/api/score-and-email',{{method:'POST'}})
-    .then(function(r){{return r.json();}})
-    .then(function(d){{b.disabled=false;b.innerHTML='Score + Email Users';var h='';for(var i=0;i<d.log.length;i++)h+='<div>'+d.log[i]+'</div>';setMsg(h);}})
-    .catch(function(e){{b.disabled=false;b.innerHTML='Score + Email Users';setMsg('Error: '+e);}});
-}}
-function loadLogs(){{
-  fetch('/api/logs').then(function(r){{return r.json();}}).then(function(d){{
+  fetch('/api/score-and-email',{method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d){b.disabled=false;b.innerHTML='Score + Email Users';var h='';for(var i=0;i<d.log.length;i++)h+='<div>'+d.log[i]+'</div>';setMsg(h);})
+    .catch(function(e){b.disabled=false;b.innerHTML='Score + Email Users';setMsg('Error: '+e);});
+}
+function loadLogs(){
+  fetch('/api/logs').then(function(r){return r.json();}).then(function(d){
     var b=document.getElementById('lb');
-    if(!d.logs||!d.logs.length){{b.innerHTML='<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">No logs yet</td></tr>';return;}}
+    if(!d.logs||!d.logs.length){b.innerHTML='<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">No logs yet</td></tr>';return;}
     var h='';
-    for(var i=0;i<d.logs.length;i++){{
+    for(var i=0;i<d.logs.length;i++){
       var l=d.logs[i];
       var s=l.status||'';
       var bg=s==='success'?'#dcfce7;color:#166534':s==='error'?'#fee2e2;color:#991b1b':'#dbeafe;color:#1d4ed8';
-      h+='<tr><td>'+(i+1)+'</td><td>'+((l.started_at||'').slice(0,16).replace('T',' '))+'</td><td>'+((l.finished_at||'—').slice(0,16).replace('T',' '))+'</td>';
+      h+='<tr><td>'+(i+1)+'</td><td>'+((l.started_at||'').slice(0,16).replace('T',' '))+'</td><td>'+((l.finished_at||'').slice(0,16).replace('T',' '))+'</td>';
       h+='<td><span style="background:'+bg+';padding:2px 8px;border-radius:20px;font-size:12px">'+s+'</span></td>';
       h+='<td>'+(l.total_scraped||0)+'</td><td>'+(l.total_saved||0)+'</td>';
       h+='<td><button onclick="showLog(\''+l.id+'\')" style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">View</button></td></tr>';
-    }}
+    }
     b.innerHTML=h;
-  }});
-}}
-function showLog(id){{
+  });
+}
+function showLog(id){
   var d=document.getElementById('ld');var c=document.getElementById('lc');
   d.style.display='block';c.textContent='Loading...';
-  d.scrollIntoView({{behavior:'smooth'}});
-  fetch('/api/logs/'+id).then(function(r){{return r.json();}}).then(function(d){{c.textContent=d.log_text||'No content yet';c.scrollTop=c.scrollHeight;}});
-}}
+  d.scrollIntoView({behavior:'smooth'});
+  fetch('/api/logs/'+id).then(function(r){return r.json();}).then(function(d){c.textContent=d.log_text||'No content yet';c.scrollTop=c.scrollHeight;});
+}
 </script>
 </body></html>"""
-    return html
+
+    page = page.replace("JOBCOUNT", str(len(jobs)))
+    page = page.replace("TITLECOUNT", str(len(titles)))
+    page = page.replace("USERCOUNT", str(len(users)))
+    page = page.replace("TODAYCOUNT", str(scraped_today))
+    page = page.replace("LOGCOUNT", str(len(logs)))
+    page = page.replace("JOBSHTML", jobs_html)
+    page = page.replace("TITLESHTML", titles_html)
+    page = page.replace("USERSHTML", users_html)
+    page = page.replace("LOGSHTML", logs_html)
+    return page
+
+
+@app.route('/')
+def dashboard():
+    return build_dashboard_html()
 
 
 @app.route('/health')
 def health():
     return jsonify({"status": "ok"})
+
 
 @app.route('/api/logs')
 def api_logs():
@@ -212,6 +286,7 @@ def api_logs():
     except Exception as e:
         return jsonify({"error": str(e), "logs": []})
 
+
 @app.route('/api/logs/<log_id>')
 def api_log_detail(log_id):
     try:
@@ -220,6 +295,7 @@ def api_log_detail(log_id):
     except Exception as e:
         return jsonify({"error": str(e)})
 
+
 @app.route('/api/run-scraper', methods=['POST'])
 def api_run_scraper():
     def do_scrape():
@@ -227,6 +303,7 @@ def api_run_scraper():
         run_full_scrape()
     threading.Thread(target=do_scrape, daemon=True).start()
     return jsonify({"status": "started"})
+
 
 @app.route('/api/score-and-email', methods=['POST'])
 def api_score_and_email():
@@ -250,6 +327,7 @@ def api_score_and_email():
         log_lines.append("Error: " + str(e))
     return jsonify({"log": log_lines})
 
+
 @app.route('/api/generate-cv', methods=['POST'])
 def api_generate_cv():
     from scraper_v2 import generate_cv_cover_letter
@@ -265,6 +343,7 @@ def api_generate_cv():
         return jsonify({"success": True, "emailed": sent})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/add-title', methods=['POST'])
 def api_add_title():
@@ -291,6 +370,7 @@ def api_add_title():
         search_jobs(keyword, user_gender=ud[0].get("gender") if ud else None)
     threading.Thread(target=bg, daemon=True).start()
     return jsonify({"success": True, "title_id": title_record["id"]})
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
