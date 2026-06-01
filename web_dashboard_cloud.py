@@ -1,323 +1,517 @@
 #!/usr/bin/env python3
 """
-JobHunter Web Dashboard
-Multi-user job matching platform
-Deployable to Railway
+JobHunter Web Dashboard — Railway deployment
+Clean version: Supabase backend, DataForSEO scraping, Resend email, AI scoring
 """
 
 import os
+import json
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Flask, render_template_string, request, jsonify
 
 app = Flask(__name__)
 
-scraper_status = {
-    "running": False,
-    "last_run": None,
-    "last_result": None,
-    "progress": 0,
-    "step": ""
-}
+# ── Supabase (service role for backend writes) ─────────────────────────────
+from supabase import create_client
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# ── HTML Template ──────────────────────────────────────────────────────────
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>JobHunter AI Dashboard</title>
+    <title>JobHunter Admin Dashboard</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
-        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
-        .header { background: white; border-radius: 20px; padding: 30px; margin-bottom: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
-        .header h1 { color: #333; margin-bottom: 10px; }
-        .header p { color: #666; }
-        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .stat-card { background: white; border-radius: 15px; padding: 25px; text-align: center; box-shadow: 0 5px 15px rgba(0,0,0,0.1); transition: transform 0.2s; }
-        .stat-card:hover { transform: translateY(-5px); }
-        .stat-card .number { font-size: 36px; font-weight: bold; color: #667eea; }
-        .stat-card .label { color: #666; margin-top: 10px; }
-        .filters { background: white; border-radius: 15px; padding: 20px; margin-bottom: 30px; display: flex; gap: 15px; flex-wrap: wrap; align-items: center; }
-        .filter-btn { padding: 10px 20px; border: 2px solid #e0e0e0; background: white; border-radius: 10px; cursor: pointer; transition: all 0.2s; }
-        .filter-btn.active { background: #667eea; color: white; border-color: #667eea; }
-        .filter-btn:hover { border-color: #667eea; }
-        .job-table { background: white; border-radius: 20px; overflow: hidden; box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f1f5f9; color: #1e293b; }
+        .header { background: linear-gradient(135deg, #1e40af, #3b82f6); color: white; padding: 20px 32px; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { font-size: 22px; font-weight: 700; }
+        .header small { opacity: 0.8; font-size: 13px; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .stat-card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+        .stat-card .value { font-size: 32px; font-weight: 700; color: #1e40af; }
+        .stat-card .label { font-size: 13px; color: #64748b; margin-top: 4px; }
+        .card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 20px; }
+        .card h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #1e293b; }
+        .btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; border-radius: 8px; border: none; cursor: pointer; font-size: 14px; font-weight: 600; transition: all 0.2s; }
+        .btn-primary { background: #2563eb; color: white; }
+        .btn-primary:hover { background: #1d4ed8; }
+        .btn-success { background: #059669; color: white; }
+        .btn-success:hover { background: #047857; }
+        .btn-sm { padding: 6px 12px; font-size: 13px; }
         table { width: 100%; border-collapse: collapse; }
-        th { background: #667eea; color: white; padding: 15px; text-align: left; font-weight: 600; }
-        td { padding: 15px; border-bottom: 1px solid #f0f0f0; }
-        tr:hover { background: #f8f9ff; }
-        .btn { padding: 8px 16px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; transition: all 0.2s; margin: 0 5px; }
-        .btn-primary { background: #667eea; color: white; }
-        .btn-primary:hover { background: #5a67d8; }
-        .search-bar { display: flex; gap: 10px; margin-bottom: 20px; }
-        .search-bar input { flex: 1; padding: 12px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 16px; }
-        .search-bar button { padding: 12px 24px; background: #667eea; color: white; border: none; border-radius: 10px; cursor: pointer; }
-        .progress-wrap { display: none; margin-top: 18px; }
-        .progress-meta { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-        .progress-step { color: #555; font-size: 14px; flex: 1; }
-        .progress-pct { font-weight: 700; color: #667eea; font-size: 16px; min-width: 48px; text-align: right; }
-        .progress-track { background: #e8e8f3; border-radius: 12px; height: 14px; overflow: hidden; }
-        .progress-fill { height: 100%; width: 0%; border-radius: 12px; background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); transition: width 0.6s cubic-bezier(0.4,0,0.2,1); }
-        @media (max-width: 768px) {
-            .container { padding: 10px; }
-            th, td { padding: 10px; font-size: 12px; }
-            .btn { padding: 4px 8px; font-size: 10px; }
-        }
+        th { text-align: left; font-size: 12px; font-weight: 600; color: #64748b; text-transform: uppercase; padding: 8px 12px; border-bottom: 2px solid #f1f5f9; }
+        td { padding: 12px; border-bottom: 1px solid #f8fafc; font-size: 14px; }
+        tr:hover td { background: #f8fafc; }
+        .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+        .badge-high { background: #dcfce7; color: #166534; }
+        .badge-mid { background: #fef9c3; color: #854d0e; }
+        .badge-low { background: #fee2e2; color: #991b1b; }
+        .badge-none { background: #f1f5f9; color: #64748b; }
+        .platform { font-size: 12px; color: #64748b; }
+        .scrape-log { background: #0f172a; color: #94a3b8; border-radius: 8px; padding: 16px; font-family: monospace; font-size: 13px; max-height: 200px; overflow-y: auto; }
+        .scrape-log .line { margin: 2px 0; }
+        .scrape-log .ok { color: #4ade80; }
+        .scrape-log .err { color: #f87171; }
+        .scrape-log .info { color: #60a5fa; }
+        .filter-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+        .filter-row input, .filter-row select { padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 14px; }
+        .truncate { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #scrapeStatus { display: none; margin-top: 12px; }
+        .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 2px solid #e2e8f0; }
+        .tab { padding: 10px 20px; cursor: pointer; font-size: 14px; font-weight: 500; color: #64748b; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+        .tab.active { color: #2563eb; border-bottom-color: #2563eb; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>🎯 JobHunter AI Dashboard</h1>
-            <p>AI-powered job matching • Smart tracking</p>
-            <button id="scraperBtn" class="btn btn-primary" onclick="triggerScraper()" style="margin-top: 15px; padding: 12px 30px; font-size: 16px;">🔍 Run Scraper</button>
-            <div id="progressWrap" class="progress-wrap">
-                <div class="progress-meta">
-                    <span id="progressStep" class="progress-step">Starting...</span>
-                    <span id="progressPct" class="progress-pct">0%</span>
-                </div>
-                <div class="progress-track">
-                    <div id="progressFill" class="progress-fill"></div>
-                </div>
-            </div>
-        </div>
+<div class="header">
+    <div>
+        <h1>🎯 JobHunter Admin</h1>
+        <small>Backend dashboard — not visible to users</small>
+    </div>
+    <div style="text-align:right">
+        <div style="font-size:13px;opacity:0.9">{{ stats.total_jobs }} jobs in pool</div>
+        <div style="font-size:12px;opacity:0.7">{{ stats.total_titles }} active titles</div>
+    </div>
+</div>
 
-        <div class="stats">
-            <div class="stat-card">
-                <div class="number">{{ stats.total }}</div>
-                <div class="label">Total Jobs</div>
-            </div>
-            <div class="stat-card">
-                <div class="number">{{ stats.linkedin }}</div>
-                <div class="label">LinkedIn</div>
-            </div>
-            <div class="stat-card">
-                <div class="number">{{ stats.indeed }}</div>
-                <div class="label">Indeed</div>
-            </div>
-            <div class="stat-card">
-                <div class="number">{{ stats.other }}</div>
-                <div class="label">Other Platforms</div>
-            </div>
-        </div>
+<div class="container">
 
-        <div class="filters">
-            <button class="filter-btn active" onclick="filterJobs('all')">All Jobs</button>
-            <button class="filter-btn" onclick="filterJobs('linkedin')">LinkedIn</button>
-            <button class="filter-btn" onclick="filterJobs('indeed')">Indeed</button>
-            <button class="filter-btn" onclick="filterJobs('bayt')">Bayt</button>
+    <!-- Stats -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="value">{{ stats.total_jobs }}</div>
+            <div class="label">Total Jobs in Pool</div>
         </div>
-
-        <div class="search-bar">
-            <input type="text" id="searchInput" placeholder="Search by job title or company..." onkeyup="searchJobs()">
-            <button onclick="searchJobs()">🔍 Search</button>
+        <div class="stat-card">
+            <div class="value">{{ stats.total_titles }}</div>
+            <div class="label">Title Pool Size</div>
         </div>
+        <div class="stat-card">
+            <div class="value">{{ stats.total_users }}</div>
+            <div class="label">Registered Users</div>
+        </div>
+        <div class="stat-card">
+            <div class="value">{{ stats.scraped_today }}</div>
+            <div class="label">Scraped Today</div>
+        </div>
+        <div class="stat-card">
+            <div class="value">{{ stats.jobs_with_scores }}</div>
+            <div class="label">Scored Jobs</div>
+        </div>
+    </div>
 
-        <div class="job-table">
-            <table id="jobTable">
+    <!-- Tabs -->
+    <div class="tabs">
+        <div class="tab active" onclick="showTab('jobs')">Job Pool</div>
+        <div class="tab" onclick="showTab('titles')">Title Pool</div>
+        <div class="tab" onclick="showTab('users')">Users</div>
+        <div class="tab" onclick="showTab('scraper')">Run Scraper</div>
+    </div>
+
+    <!-- Jobs Tab -->
+    <div id="tab-jobs" class="tab-content active">
+        <div class="card">
+            <div class="filter-row">
+                <input type="text" id="jobSearch" placeholder="Search title or company..." oninput="filterJobs()" style="flex:1;min-width:200px">
+                <select id="platformFilter" onchange="filterJobs()">
+                    <option value="">All Platforms</option>
+                    <option>LinkedIn</option>
+                    <option>Indeed</option>
+                    <option>Bayt.com</option>
+                    <option>Naukrigulf</option>
+                    <option>GulfTalent.com</option>
+                </select>
+            </div>
+            <table id="jobsTable">
                 <thead>
                     <tr>
                         <th>#</th>
-                        <th>Job Title</th>
+                        <th>Title</th>
                         <th>Company</th>
                         <th>Location</th>
                         <th>Platform</th>
                         <th>Posted</th>
                         <th>Salary</th>
-                        <th>Actions</th>
+                        <th>Score</th>
+                        <th></th>
                     </tr>
                 </thead>
-                <tbody id="jobTableBody">
-                    {% for job in jobs %}
-                    <tr data-platform="{{ (job.platform or '')|lower }}" data-title="{{ job.title|lower }}" data-company="{{ job.company|lower }}">
-                        <td>{{ loop.index }}</td>
-                        <td><a href="{{ job.link }}" target="_blank" style="color: #667eea; text-decoration: none;">{{ job.title[:60] }}{% if job.title|length > 60 %}...{% endif %}</a></td>
-                        <td>{{ job.company[:40] }}</td>
-                        <td style="font-size:13px; color:#555;">{{ job.location or 'UAE' }}</td>
-                        <td style="font-size:13px;">{{ job.platform or '—' }}</td>
-                        <td style="color:#888; font-size:13px;">{{ job.posted_at[:10] if job.posted_at else '—' }}</td>
-                        <td style="font-size:13px;">{{ job.salary or '—' }}</td>
-                        <td>
-                            <button class="btn btn-primary" onclick="window.open('{{ job.link }}', '_blank')">View</button>
-                        </td>
-                    </tr>
-                    {% endfor %}
+                <tbody>
+                {% for job in jobs %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td class="truncate" title="{{ job.title }}">{{ job.title }}</td>
+                    <td class="truncate" title="{{ job.company }}">{{ job.company }}</td>
+                    <td>{{ job.location or 'UAE' }}</td>
+                    <td class="platform">{{ job.platform or '—' }}</td>
+                    <td>{{ job.posted_at[:10] if job.posted_at else '—' }}</td>
+                    <td>{{ job.salary or '—' }}</td>
+                    <td>
+                        {% if job.score %}
+                            {% if job.score >= 80 %}
+                                <span class="badge badge-high">{{ job.score }}%</span>
+                            {% elif job.score >= 60 %}
+                                <span class="badge badge-mid">{{ job.score }}%</span>
+                            {% else %}
+                                <span class="badge badge-low">{{ job.score }}%</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="badge badge-none">—</span>
+                        {% endif %}
+                    </td>
+                    <td><a href="{{ job.link }}" target="_blank" class="btn btn-primary btn-sm">View</a></td>
+                </tr>
+                {% endfor %}
                 </tbody>
             </table>
         </div>
     </div>
 
-    <script>
-        function filterJobs(type) {
-            const rows = document.querySelectorAll('#jobTableBody tr');
-            rows.forEach(row => {
-                const platform = row.dataset.platform;
-                if (type === 'all') row.style.display = '';
-                else row.style.display = platform.includes(type) ? '' : 'none';
-            });
-            document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
-        }
+    <!-- Titles Tab -->
+    <div id="tab-titles" class="tab-content">
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Keyword</th>
+                        <th>Last Scraped</th>
+                        <th>Request Count</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for t in titles %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ t.keyword }}</td>
+                    <td>{{ t.last_scraped[:16].replace('T',' ') if t.last_scraped else 'Never' }}</td>
+                    <td>{{ t.request_count or 0 }}</td>
+                    <td>
+                        {% if t.last_scraped and t.last_scraped[:10] == today %}
+                            <span class="badge badge-high">Fresh</span>
+                        {% elif t.last_scraped %}
+                            <span class="badge badge-mid">Stale</span>
+                        {% else %}
+                            <span class="badge badge-none">New</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
 
-        function searchJobs() {
-            const searchTerm = document.getElementById('searchInput').value.toLowerCase();
-            const rows = document.querySelectorAll('#jobTableBody tr');
-            rows.forEach(row => {
-                const title = row.dataset.title;
-                const company = row.dataset.company;
-                row.style.display = (title.includes(searchTerm) || company.includes(searchTerm)) ? '' : 'none';
-            });
-        }
+    <!-- Users Tab -->
+    <div id="tab-users" class="tab-content">
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>Gender</th>
+                        <th>CV</th>
+                        <th>Joined</th>
+                        <th>Active</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for u in users %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ u.name or '—' }}</td>
+                    <td>{{ u.email }}</td>
+                    <td>{{ u.gender or '—' }}</td>
+                    <td>{{ '✅' if u.cv_text else '❌' }}</td>
+                    <td>{{ u.created_at[:10] if u.created_at else '—' }}</td>
+                    <td>{{ '✅' if u.is_active else '❌' }}</td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
 
-        function setProgress(pct, step) {
-            document.getElementById('progressFill').style.width = pct + '%';
-            document.getElementById('progressPct').textContent = pct + '%';
-            if (step) document.getElementById('progressStep').textContent = step;
-        }
+    <!-- Scraper Tab -->
+    <div id="tab-scraper" class="tab-content">
+        <div class="card">
+            <h2>Run Scraper</h2>
+            <p style="color:#64748b;font-size:14px;margin-bottom:16px;">
+                Scrapes all active titles in the pool. Respects 24h cache — only fetches stale titles.
+                Daily ceiling: <strong>200 scrapes</strong>.
+            </p>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                <button class="btn btn-primary" onclick="runScraper()">
+                    ▶ Run Scraper Now
+                </button>
+                <button class="btn btn-success" onclick="runScoringEmail()">
+                    🤖 Score + Email All Users
+                </button>
+            </div>
+            <div id="scrapeStatus" class="scrape-log" style="display:none;margin-top:16px;">
+                <div class="line info">Starting...</div>
+            </div>
+        </div>
+    </div>
 
-        function showProgress(visible) {
-            document.getElementById('progressWrap').style.display = visible ? 'block' : 'none';
-        }
+</div>
 
-        function triggerScraper() {
-            const btn = document.getElementById('scraperBtn');
-            btn.disabled = true;
-            btn.textContent = '⏳ Starting...';
-            showProgress(true);
-            setProgress(0, '🚀 Connecting...');
+<script>
+function showTab(name) {
+    document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', ['jobs','titles','users','scraper'][i] === name));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+}
 
-            fetch('/trigger-scraper', { method: 'POST' })
-            .then(r => r.json())
-            .then(data => {
-                if (data.success) {
-                    btn.textContent = '🔄 Running...';
-                    pollScraperStatus();
-                } else {
-                    btn.disabled = false;
-                    btn.textContent = '🔍 Run Scraper';
-                    showProgress(false);
-                    alert('⚠️ ' + data.error);
-                }
-            })
-            .catch(() => {
-                btn.disabled = false;
-                btn.textContent = '🔍 Run Scraper';
-                showProgress(false);
-            });
-        }
+function filterJobs() {
+    const q = document.getElementById('jobSearch').value.toLowerCase();
+    const p = document.getElementById('platformFilter').value.toLowerCase();
+    const rows = document.querySelectorAll('#jobsTable tbody tr');
+    rows.forEach(row => {
+        const text = row.textContent.toLowerCase();
+        const match = (!q || text.includes(q)) && (!p || text.includes(p));
+        row.style.display = match ? '' : 'none';
+    });
+}
 
-        function pollScraperStatus() {
-            const btn = document.getElementById('scraperBtn');
-            const interval = setInterval(() => {
-                fetch('/scraper-status')
-                .then(r => r.json())
-                .then(data => {
-                    setProgress(data.progress || 0, data.step || '');
-                    if (!data.running) {
-                        clearInterval(interval);
-                        setProgress(100, data.step || '✅ Done!');
-                        btn.textContent = '✅ Done!';
-                        setTimeout(() => {
-                            btn.disabled = false;
-                            btn.textContent = '🔍 Run Scraper';
-                            showProgress(false);
-                            location.reload();
-                        }, 3000);
-                    }
-                });
-            }, 3000);
-        }
+function runScraper() {
+    const status = document.getElementById('scrapeStatus');
+    status.style.display = 'block';
+    status.innerHTML = '<div class="line info"><span class="spinner"></span> Running scraper...</div>';
+    fetch('/api/run-scraper', {method: 'POST'})
+        .then(r => r.json())
+        .then(d => {
+            status.innerHTML = d.log.map(l =>
+                `<div class="line ${l.startsWith('✅') || l.startsWith('💾') ? 'ok' : l.startsWith('❌') ? 'err' : 'info'}">${l}</div>`
+            ).join('') + `<div class="line ok">Done — ${d.total_saved} new jobs saved</div>`;
+            setTimeout(() => location.reload(), 2000);
+        })
+        .catch(e => { status.innerHTML = `<div class="line err">Error: ${e}</div>`; });
+}
 
-        fetch('/scraper-status').then(r => r.json()).then(data => {
-            if (data.running) {
-                const btn = document.getElementById('scraperBtn');
-                btn.disabled = true;
-                btn.textContent = '🔄 Running...';
-                showProgress(true);
-                setProgress(data.progress || 0, data.step || '🔄 Running...');
-                pollScraperStatus();
-            }
-        });
-    </script>
+function runScoringEmail() {
+    const status = document.getElementById('scrapeStatus');
+    status.style.display = 'block';
+    status.innerHTML = '<div class="line info"><span class="spinner"></span> Scoring and emailing all users...</div>';
+    fetch('/api/score-and-email', {method: 'POST'})
+        .then(r => r.json())
+        .then(d => {
+            status.innerHTML = d.log.map(l =>
+                `<div class="line ${l.includes('✅') ? 'ok' : l.includes('❌') ? 'err' : 'info'}">${l}</div>`
+            ).join('');
+        })
+        .catch(e => { status.innerHTML = `<div class="line err">Error: ${e}</div>`; });
+}
+</script>
 </body>
 </html>
 """
 
-def load_jobs():
-    """Load jobs from Supabase"""
+# ── Load dashboard data ────────────────────────────────────────────────────
+def load_dashboard_data():
     try:
-        from scraper_v2 import supabase
-        result = supabase.table("job_pool")\
-            .select("*")\
-            .order("last_scraped", desc=True)\
-            .limit(500)\
-            .execute()
-        return result.data or []
-    except Exception as e:
-        print(f"Error loading jobs: {e}")
-        return []
+        jobs = supabase.table("job_pool").select("*").order("created_at", desc=True).limit(200).execute().data or []
+        titles = supabase.table("title_pool").select("*").order("request_count", desc=True).execute().data or []
+        users = supabase.table("users").select("id,name,email,gender,cv_text,is_active,created_at").order("created_at", desc=True).execute().data or []
 
+        today = datetime.now(timezone.utc).date().isoformat()
+        scraped_today = len([t for t in titles if t.get("last_scraped", "")[:10] == today])
+        jobs_with_scores = len([j for j in jobs if j.get("score")])
+
+        stats = {
+            "total_jobs": len(jobs),
+            "total_titles": len(titles),
+            "total_users": len(users),
+            "scraped_today": scraped_today,
+            "jobs_with_scores": jobs_with_scores,
+        }
+        return jobs, titles, users, stats, today
+    except Exception as e:
+        print(f"Dashboard load error: {e}")
+        return [], [], [], {"total_jobs":0,"total_titles":0,"total_users":0,"scraped_today":0,"jobs_with_scores":0}, ""
+
+
+# ── Routes ─────────────────────────────────────────────────────────────────
 @app.route('/')
 def dashboard():
-    jobs = load_jobs()
-    stats = {
-        'total': len(jobs),
-        'linkedin': len([j for j in jobs if 'linkedin' in (j.get('platform') or '').lower()]),
-        'indeed': len([j for j in jobs if 'indeed' in (j.get('platform') or '').lower()]),
-        'other': len([j for j in jobs if 'linkedin' not in (j.get('platform') or '').lower() and 'indeed' not in (j.get('platform') or '').lower()])
-    }
-    return render_template_string(HTML_TEMPLATE, jobs=jobs, stats=stats)
+    jobs, titles, users, stats, today = load_dashboard_data()
+    return render_template_string(HTML_TEMPLATE, jobs=jobs, titles=titles, users=users, stats=stats, today=today)
 
-@app.route('/trigger-scraper', methods=['POST'])
-def trigger_scraper():
-    global scraper_status
-    if scraper_status["running"]:
-        return jsonify({'success': False, 'error': 'Scraper is already running.'})
-
-    def run_scraper_thread():
-        global scraper_status
-        scraper_status["running"] = True
-        scraper_status["progress"] = 0
-        scraper_status["step"] = "🚀 Starting..."
-        scraper_status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-        try:
-            from scraper_v2 import search_jobs
-            keywords = [
-                "pharmacy manager UAE",
-                "area manager UAE",
-                "operations manager UAE",
-                "retail manager UAE",
-                "regional manager UAE",
-            ]
-            total = len(keywords)
-            for i, keyword in enumerate(keywords):
-                pct = int((i / total) * 90)
-                scraper_status["step"] = f"🔍 Searching: {keyword}"
-                scraper_status["progress"] = pct
-                search_jobs(keyword)
-
-            scraper_status["last_result"] = "✅ Done"
-            scraper_status["progress"] = 100
-            scraper_status["step"] = "✅ Done!"
-        except Exception as e:
-            scraper_status["last_result"] = f"❌ Error: {str(e)}"
-            scraper_status["step"] = f"❌ Error: {str(e)[:80]}"
-        finally:
-            scraper_status["running"] = False
-
-    threading.Thread(target=run_scraper_thread, daemon=True).start()
-    return jsonify({'success': True, 'message': 'Scraper started!'})
-
-@app.route('/scraper-status')
-def get_scraper_status():
-    return jsonify(scraper_status)
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'timestamp': datetime.now().isoformat()})
+    return jsonify({"status": "ok", "time": datetime.now(timezone.utc).isoformat()})
+
+
+@app.route('/api/run-scraper', methods=['POST'])
+def api_run_scraper():
+    from scraper_v2 import search_jobs, get_cached_jobs, normalize_title, is_fresh
+    log = []
+    total_saved = 0
+
+    try:
+        titles = supabase.table("title_pool").select("*").execute().data or []
+        if not titles:
+            log.append("ℹ️ No titles in pool yet")
+            return jsonify({"log": log, "total_saved": 0})
+
+        for t in titles:
+            keyword = t["keyword"]
+            log.append(f"🔍 {keyword}")
+            jobs_before = len(get_cached_jobs(keyword))
+            search_jobs(keyword)
+            jobs_after = len(get_cached_jobs(keyword))
+            new = jobs_after - jobs_before
+            total_saved += new
+            log.append(f"  ✅ +{new} new jobs" if new else f"  ✅ Cache fresh")
+
+        log.append(f"\n✅ Total new jobs: {total_saved}")
+    except Exception as e:
+        log.append(f"❌ Error: {str(e)}")
+
+    return jsonify({"log": log, "total_saved": total_saved})
+
+
+@app.route('/api/score-and-email', methods=['POST'])
+def api_score_and_email():
+    from scraper_v2 import search_and_score_for_user
+    from email_service import send_job_matches_email
+    log = []
+
+    try:
+        users = supabase.table("users").select("*").eq("is_active", True).execute().data or []
+        if not users:
+            log.append("ℹ️ No active users")
+            return jsonify({"log": log})
+
+        for user in users:
+            log.append(f"👤 {user.get('name') or user.get('email')}")
+            matched = search_and_score_for_user(user)
+            if matched:
+                sent = send_job_matches_email(user["email"], user.get("name"), matched)
+                log.append(f"  ✅ {len(matched)} matches, email {'sent' if sent else 'failed'}")
+            else:
+                log.append(f"  ℹ️ No 60%+ matches")
+
+    except Exception as e:
+        log.append(f"❌ Error: {str(e)}")
+
+    return jsonify({"log": log})
+
+
+@app.route('/api/generate-cv', methods=['POST'])
+def api_generate_cv():
+    """Generate CV + cover letter for a user/job combo and email it"""
+    from scraper_v2 import generate_cv_cover_letter
+    from email_service import send_cv_cover_letter_email
+
+    data = request.json or {}
+    user_id = data.get("user_id")
+    job_id = data.get("job_id")
+
+    if not user_id or not job_id:
+        return jsonify({"error": "user_id and job_id required"}), 400
+
+    try:
+        user = supabase.table("users").select("*").eq("id", user_id).execute().data
+        job = supabase.table("job_pool").select("*").eq("id", job_id).execute().data
+
+        if not user or not job:
+            return jsonify({"error": "User or job not found"}), 404
+
+        user, job = user[0], job[0]
+
+        cover_letter, tailored_cv = generate_cv_cover_letter(user, job)
+        if not cover_letter and not tailored_cv:
+            return jsonify({"error": "Generation failed"}), 500
+
+        sent = send_cv_cover_letter_email(
+            user["email"],
+            user.get("name"),
+            job["title"],
+            job["company"],
+            tailored_cv,
+            cover_letter
+        )
+
+        return jsonify({"success": True, "emailed": sent})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/add-title', methods=['POST'])
+def api_add_title():
+    """Add a title for a user — validates, deduplicates, triggers scrape if new"""
+    from scraper_v2 import validate_title, normalize_title, search_jobs
+
+    data = request.json or {}
+    user_id = data.get("user_id")
+    keyword = (data.get("keyword") or "").strip()
+
+    if not user_id or not keyword:
+        return jsonify({"error": "user_id and keyword required"}), 400
+
+    if not validate_title(keyword):
+        return jsonify({"error": "Invalid job title — must be at least 3 characters and contain letters"}), 400
+
+    # Check user hasn't exceeded 5 titles
+    existing = supabase.table("user_titles")\
+        .select("id")\
+        .eq("user_id", user_id)\
+        .execute()
+    if len(existing.data or []) >= 5:
+        return jsonify({"error": "Maximum 5 job titles allowed"}), 400
+
+    # Get or create title in pool
+    normalized = normalize_title(keyword)
+    title_result = supabase.table("title_pool")\
+        .select("*")\
+        .eq("normalized", normalized)\
+        .execute()
+
+    if title_result.data:
+        title_record = title_result.data[0]
+    else:
+        title_record = supabase.table("title_pool").insert({
+            "keyword": keyword,
+            "normalized": normalized,
+            "request_count": 0
+        }).execute().data[0]
+
+    # Link user to title
+    try:
+        supabase.table("user_titles").insert({
+            "user_id": user_id,
+            "title_id": title_record["id"]
+        }).execute()
+    except:
+        pass  # Already exists — fine
+
+    # Trigger scrape in background
+    def background_scrape():
+        user_data = supabase.table("users").select("gender").eq("id", user_id).execute().data
+        gender = user_data[0].get("gender") if user_data else None
+        search_jobs(keyword, user_gender=gender)
+
+    threading.Thread(target=background_scrape, daemon=True).start()
+
+    return jsonify({"success": True, "title_id": title_record["id"], "message": "Title added — scraping in background"})
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
