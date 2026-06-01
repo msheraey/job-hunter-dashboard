@@ -359,15 +359,14 @@ def health():
 
 @app.route('/api/run-scraper', methods=['POST'])
 def api_run_scraper():
-    from scraper_v2 import search_jobs, get_cached_jobs, normalize_title, is_fresh
-    log = []
-    total_saved = 0
-
-    try:
+    def do_scrape():
+        from scraper_v2 import search_jobs, get_cached_jobs
         titles = supabase.table("title_pool").select("*").execute().data or []
-        if not titles:
-            log.append("ℹ️ No titles in pool yet")
-            return jsonify({"log": log, "total_saved": 0})
+        for t in titles:
+            search_jobs(t["keyword"])
+
+    threading.Thread(target=do_scrape, daemon=True).start()
+    return jsonify({"log": ["🚀 Scraper started in background — check back in 2 minutes"], "total_saved": 0})
 
         for t in titles:
             keyword = t["keyword"]
