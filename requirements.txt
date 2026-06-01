@@ -6,3 +6,4 @@ anthropic
 httpx
 beautifulsoup4
 lxml
+resend
