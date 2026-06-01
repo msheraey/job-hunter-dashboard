@@ -362,7 +362,10 @@ def load_dashboard_data():
         jobs = supabase.table("job_pool").select("*").order("created_at", desc=True).limit(200).execute().data or []
         titles = supabase.table("title_pool").select("*").order("request_count", desc=True).execute().data or []
         users = supabase.table("users").select("id,name,email,gender,cv_text,is_active,created_at").order("created_at", desc=True).execute().data or []
-        logs = supabase.table("scrape_logs").select("id,started_at,finished_at,status,total_scraped,total_saved,error").order("started_at", desc=True).limit(20).execute().data or []
+        try:
+    logs = supabase.table("scrape_logs").select("id,started_at,finished_at,status,total_scraped,total_saved,error").order("started_at", desc=True).limit(20).execute().data or []
+except:
+    logs = []
         today = datetime.now(timezone.utc).date().isoformat()
         scraped_today = len([t for t in titles if t.get("last_scraped", "")[:10] == today])
         stats = {
