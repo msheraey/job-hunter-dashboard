@@ -3,8 +3,10 @@ import os
 import threading
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)  # Allow cross-origin requests from the Lovable frontend
 
 from supabase import create_client
 supabase = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY"))
