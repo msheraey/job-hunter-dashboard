@@ -7,6 +7,7 @@ JobHunter Scraper v2 — Multi-user, on-demand pool architecture
 - AI scoring via Groq (free) with Claude Haiku fallback
 - Gender eligibility filter
 - Daily spend ceiling protection
+- Full run logging to Supabase scrape_logs table
 """
 
 import os
@@ -21,22 +22,22 @@ from supabase import create_client
 DATAFORSEO_LOGIN    = os.environ.get("DATAFORSEO_LOGIN")
 DATAFORSEO_PASSWORD = os.environ.get("DATAFORSEO_PASSWORD")
 SUPABASE_URL        = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY        = os.environ.get("SUPABASE_SERVICE_KEY")  # service role — bypasses RLS
+SUPABASE_KEY        = os.environ.get("SUPABASE_SERVICE_KEY")
 GROQ_API_KEY        = os.environ.get("GROQ_API_KEY")
 ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TTL_HOURS = 24
-MAX_DAILY_SCRAPES = 200  # hard spend ceiling — stop scraping if exceeded
+MAX_DAILY_SCRAPES = 200
 
-# ── Trusted platforms only ─────────────────────────────────────────────────
+# ── Trusted platforms ──────────────────────────────────────────────────────
 TRUSTED_DOMAINS = [
     "linkedin.com", "indeed.com", "bayt.com",
     "naukrigulf.com", "gulftalent.com", "gofindit.com"
 ]
 
-# ── Junk/skip filters ──────────────────────────────────────────────────────
+# ── Filters ────────────────────────────────────────────────────────────────
 JUNK_PATTERNS = [
     re.compile(r"jobs in (uae|dubai|abu dhabi|sharjah).*(20\d\d)", re.I),
     re.compile(r"\d+\+?\s+(jobs|vacancies)", re.I),
@@ -45,9 +46,7 @@ JUNK_PATTERNS = [
     re.compile(r"jobs?,\s+employment", re.I),
 ]
 
-NATIONALITY_SKIP = [
-    "UAEN", "UAE NATIONAL", "EMIRATI", "NATIONAL ONLY",
-]
+NATIONALITY_SKIP = ["UAEN", "UAE NATIONAL", "EMIRATI", "NATIONAL ONLY"]
 
 FEMALE_ONLY_PATTERNS = [
     re.compile(r"\bfemale(s)?\s+only\b", re.I),
@@ -70,10 +69,6 @@ def is_nationality_restricted(title):
     return any(kw in title.upper() for kw in NATIONALITY_SKIP)
 
 def is_gender_restricted(text, user_gender):
-    """
-    Returns True if the job should be filtered out for this user's gender.
-    user_gender: 'male', 'female', or None
-    """
     if not user_gender or user_gender == "prefer_not_to_say":
         return False
     combined = text.upper() if text else ""
@@ -87,25 +82,85 @@ def normalize_title(title):
     return re.sub(r'\s+', ' ', title.strip().lower())
 
 def validate_title(title):
-    """Basic sanity check — reject gibberish"""
     t = title.strip()
     if len(t) < 3 or len(t) > 80:
         return False
     if not re.search(r'[a-zA-Z]', t):
         return False
-    if re.match(r'^[^a-zA-Z]*$', t):
-        return False
     return True
+
+
+# ── Logger class ───────────────────────────────────────────────────────────
+class RunLogger:
+    def __init__(self, run_type="scraper"):
+        self.run_type = run_type
+        self.lines = []
+        self.total_scraped = 0
+        self.total_saved = 0
+        self.log_id = None
+        self.started_at = datetime.now(timezone.utc).isoformat()
+        self._create_log_entry()
+
+    def _create_log_entry(self):
+        try:
+            result = supabase.table("scrape_logs").insert({
+                "started_at": self.started_at,
+                "status": "running",
+                "log_text": f"[{self.run_type}] Started\n",
+                "total_scraped": 0,
+                "total_saved": 0
+            }).execute()
+            self.log_id = result.data[0]["id"]
+            print(f"📋 Log entry created: {self.log_id}")
+        except Exception as e:
+            print(f"⚠️ Could not create log entry: {e}")
+
+    def add(self, msg, print_it=True):
+        ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}"
+        self.lines.append(line)
+        if print_it:
+            print(msg)
+        # Save to DB every 5 lines
+        if len(self.lines) % 5 == 0:
+            self._flush()
+
+    def _flush(self):
+        if not self.log_id:
+            return
+        try:
+            supabase.table("scrape_logs").update({
+                "log_text": "\n".join(self.lines),
+                "total_scraped": self.total_scraped,
+                "total_saved": self.total_saved,
+            }).eq("id", self.log_id).execute()
+        except Exception as e:
+            print(f"⚠️ Log flush error: {e}")
+
+    def finish(self, success=True, error=None):
+        if not self.log_id:
+            return
+        try:
+            update = {
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "status": "success" if success else "error",
+                "log_text": "\n".join(self.lines),
+                "total_scraped": self.total_scraped,
+                "total_saved": self.total_saved,
+            }
+            if error:
+                update["error"] = str(error)[:1000]
+            supabase.table("scrape_logs").update(update).eq("id", self.log_id).execute()
+            print(f"📋 Log saved — status: {'success' if success else 'error'}")
+        except Exception as e:
+            print(f"⚠️ Log finish error: {e}")
+
 
 # ── Spend ceiling ──────────────────────────────────────────────────────────
 def get_today_scrape_count():
-    """Count scrapes done today"""
     try:
         today = datetime.now(timezone.utc).date().isoformat()
-        result = supabase.table("title_pool")\
-            .select("id")\
-            .gte("last_scraped", today)\
-            .execute()
+        result = supabase.table("title_pool").select("id").gte("last_scraped", today).execute()
         return len(result.data or [])
     except:
         return 0
@@ -113,13 +168,21 @@ def get_today_scrape_count():
 def is_over_daily_ceiling():
     count = get_today_scrape_count()
     if count >= MAX_DAILY_SCRAPES:
-        print(f"  ⚠️ Daily scrape ceiling reached ({count}/{MAX_DAILY_SCRAPES}) — serving cache only")
+        print(f"⚠️ Daily ceiling reached ({count}/{MAX_DAILY_SCRAPES})")
         return True
     return False
 
+
 # ── DataForSEO ─────────────────────────────────────────────────────────────
-def dataforseo_search(keyword):
+def dataforseo_search(keyword, logger=None):
+    def log(msg):
+        if logger:
+            logger.add(msg)
+        else:
+            print(msg)
+
     try:
+        log(f"  📡 Posting task to DataForSEO for '{keyword}'...")
         post_resp = requests.post(
             "https://api.dataforseo.com/v3/serp/google/jobs/task_post",
             auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
@@ -135,14 +198,15 @@ def dataforseo_search(keyword):
         tasks = post_data.get("tasks", [])
 
         if not tasks or tasks[0].get("status_code") not in [20000, 20100]:
-            print(f"  ❌ task_post failed for '{keyword}': {post_data}")
+            log(f"  ❌ task_post failed: {post_data.get('status_message','unknown error')}")
             return []
 
         task_id = tasks[0].get("id")
-        print(f"  ✅ Task created: {task_id}")
+        log(f"  ✅ Task created: {task_id} — waiting 10s...")
 
         time.sleep(10)
 
+        log(f"  📥 Fetching results...")
         get_resp = requests.get(
             f"https://api.dataforseo.com/v3/serp/google/jobs/task_get/advanced/{task_id}",
             auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
@@ -152,63 +216,50 @@ def dataforseo_search(keyword):
         result_tasks = get_data.get("tasks", [])
 
         if not result_tasks or not result_tasks[0].get("result"):
-            print(f"  ⚠️ No results yet for task {task_id}")
+            log(f"  ⚠️ No results returned for task {task_id}")
             return []
 
         items = result_tasks[0]["result"][0].get("items", [])
-        print(f"  📋 Found {len(items)} raw jobs for '{keyword}'")
+        log(f"  📋 Got {len(items)} raw results")
         return items
 
     except Exception as e:
-        print(f"  ❌ DataForSEO error for '{keyword}': {e}")
+        log(f"  ❌ DataForSEO error: {e}")
         return []
+
 
 # ── AI Scoring ─────────────────────────────────────────────────────────────
 def score_job_with_groq(job_title, job_company, job_description, user_profile):
-    """Score job against user profile using Groq (free tier)"""
-    prompt = f"""You are a job matching expert. Score how well this job matches the candidate's profile.
+    prompt = f"""You are a job matching expert. Score how well this job matches the candidate.
 
 JOB:
 Title: {job_title}
 Company: {job_company}
 Description: {job_description[:500] if job_description else 'Not provided'}
 
-CANDIDATE PROFILE:
+CANDIDATE:
 {user_profile}
 
-Return ONLY a JSON object like this, nothing else:
-{{"score": 75, "reason": "Strong match on management experience"}}
-
-Score 0-100. Be strict — only score high if it's genuinely relevant."""
+Return ONLY JSON: {{"score": 75, "reason": "brief reason"}}
+Score 0-100. Be strict."""
 
     try:
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "llama3-8b-8192",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 100,
-                "temperature": 0.1
-            },
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "llama3-8b-8192", "messages": [{"role": "user", "content": prompt}], "max_tokens": 100, "temperature": 0.1},
             timeout=15
         )
         content = resp.json()["choices"][0]["message"]["content"].strip()
         content = re.sub(r'```json|```', '', content).strip()
-        result = json.loads(content)
-        return int(result.get("score", 0))
+        return int(json.loads(content).get("score", 0))
     except Exception as e:
-        print(f"    ⚠️ Groq scoring failed: {e} — trying Claude Haiku")
+        print(f"    ⚠️ Groq failed: {e} — trying Haiku")
         return score_job_with_haiku(job_title, job_company, job_description, user_profile)
 
 
 def score_job_with_haiku(job_title, job_company, job_description, user_profile):
-    """Fallback: score using Claude Haiku"""
     prompt = f"""Score this job match 0-100. Return only JSON: {{"score": N}}
-
 Job: {job_title} at {job_company}
 Description: {job_description[:300] if job_description else ''}
 Candidate: {user_profile[:500]}"""
@@ -216,88 +267,55 @@ Candidate: {user_profile[:500]}"""
     try:
         resp = requests.post(
             "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 50,
-                "messages": [{"role": "user", "content": prompt}]
-            },
+            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 50, "messages": [{"role": "user", "content": prompt}]},
             timeout=15
         )
         content = resp.json()["content"][0]["text"].strip()
         content = re.sub(r'```json|```', '', content).strip()
-        result = json.loads(content)
-        return int(result.get("score", 0))
+        return int(json.loads(content).get("score", 0))
     except Exception as e:
-        print(f"    ❌ Haiku scoring also failed: {e}")
+        print(f"    ❌ Haiku also failed: {e}")
         return 0
 
 
 def score_jobs_for_user(jobs, user):
-    """Score a list of jobs against a user's profile"""
     profile_parts = []
     if user.get("profile_summary"):
         profile_parts.append(f"Summary: {user['profile_summary']}")
     if user.get("cv_text"):
         profile_parts.append(f"CV: {user['cv_text'][:1000]}")
     if not profile_parts:
-        return jobs  # no profile to score against
-
+        return jobs
     user_profile = "\n".join(profile_parts)
-    scored = []
     for job in jobs:
-        score = score_job_with_groq(
-            job.get("title", ""),
-            job.get("company", ""),
-            job.get("description", ""),
-            user_profile
+        job["score"] = score_job_with_groq(
+            job.get("title", ""), job.get("company", ""),
+            job.get("description", ""), user_profile
         )
-        job["score"] = score
-        scored.append(job)
-    return scored
+    return jobs
 
 
-# ── CV + Cover Letter Generation ───────────────────────────────────────────
+# ── CV + Cover Letter ──────────────────────────────────────────────────────
 def generate_cv_cover_letter(user, job):
-    """Generate tailored CV and cover letter for a specific job"""
-    prompt = f"""Generate a tailored CV and cover letter for this job application.
+    prompt = f"""Generate a tailored CV and cover letter for this UAE job application.
 
-JOB:
-Title: {job.get('title')}
-Company: {job.get('company')}
+JOB: {job.get('title')} at {job.get('company')}
 Description: {job.get('description', '')[:800]}
 
 CANDIDATE:
 {user.get('profile_summary', '')}
 
-CV TEXT:
-{user.get('cv_text', '')[:2000]}
+CV: {user.get('cv_text', '')[:2000]}
 
-Return ONLY a JSON object:
-{{
-  "cover_letter": "...",
-  "tailored_cv": "..."
-}}
-
-Make both professional, specific to the job, and appropriate for UAE market."""
+Return ONLY JSON:
+{{"cover_letter": "...", "tailored_cv": "..."}}"""
 
     try:
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "llama3-70b-8192",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 2000,
-                "temperature": 0.3
-            },
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "llama3-70b-8192", "messages": [{"role": "user", "content": prompt}], "max_tokens": 2000, "temperature": 0.3},
             timeout=30
         )
         content = resp.json()["choices"][0]["message"]["content"].strip()
@@ -305,7 +323,7 @@ Make both professional, specific to the job, and appropriate for UAE market."""
         result = json.loads(content)
         return result.get("cover_letter", ""), result.get("tailored_cv", "")
     except Exception as e:
-        print(f"  ❌ CV generation error: {e}")
+        print(f"❌ CV generation error: {e}")
         return "", ""
 
 
@@ -324,46 +342,34 @@ def is_fresh(last_scraped_str):
 
 def get_or_create_title(keyword):
     normalized = normalize_title(keyword)
-    result = supabase.table("title_pool")\
-        .select("*")\
-        .eq("normalized", normalized)\
-        .execute()
-
+    result = supabase.table("title_pool").select("*").eq("normalized", normalized).execute()
     if result.data:
-        # Increment request count
         current = result.data[0].get("request_count", 0) or 0
-        supabase.table("title_pool")\
-            .update({"request_count": current + 1})\
-            .eq("id", result.data[0]["id"])\
-            .execute()
+        supabase.table("title_pool").update({"request_count": current + 1}).eq("id", result.data[0]["id"]).execute()
         return result.data[0], False
-
     insert = supabase.table("title_pool").insert({
-        "keyword": keyword,
-        "normalized": normalized,
-        "request_count": 1
+        "keyword": keyword, "normalized": normalized, "request_count": 1
     }).execute()
     return insert.data[0], True
 
 
 def get_cached_jobs(keyword):
     normalized = normalize_title(keyword)
-    result = supabase.table("job_pool")\
-        .select("*")\
-        .eq("search_keyword", normalized)\
-        .order("posted_at", desc=True)\
-        .execute()
+    result = supabase.table("job_pool").select("*").eq("search_keyword", normalized).order("posted_at", desc=True).execute()
     return result.data or []
 
 
-def save_jobs(keyword, items):
+def save_jobs(keyword, items, logger=None):
+    def log(msg):
+        if logger:
+            logger.add(msg)
+        else:
+            print(msg)
+
     normalized = normalize_title(keyword)
     saved = 0
 
-    existing = supabase.table("job_pool")\
-        .select("link")\
-        .eq("search_keyword", normalized)\
-        .execute()
+    existing = supabase.table("job_pool").select("link").eq("search_keyword", normalized).execute()
     existing_links = {r["link"] for r in (existing.data or [])}
 
     for item in items:
@@ -378,10 +384,8 @@ def save_jobs(keyword, items):
 
         if not link or not link.startswith("http"):
             continue
-
         if not any(d in link for d in TRUSTED_DOMAINS):
             continue
-
         if link in existing_links:
             continue
 
@@ -389,119 +393,139 @@ def save_jobs(keyword, items):
             posted_raw = item.get("timestamp")
             posted_at = None
             if posted_raw:
-                posted_at = datetime.fromisoformat(
-                    posted_raw.replace(" +00:00", "+00:00")
-                ).isoformat()
+                posted_at = datetime.fromisoformat(posted_raw.replace(" +00:00", "+00:00")).isoformat()
         except:
             posted_at = None
 
         description = (item.get("description") or item.get("snippet") or "")[:1500]
 
-        supabase.table("job_pool").insert({
-            "title": title[:200],
-            "company": company[:100],
-            "location": item.get("location", "UAE"),
-            "posted_at": posted_at,
-            "link": link,
-            "platform": platform[:100],
-            "description": description,
-            "search_keyword": normalized,
-            "salary": item.get("salary", ""),
-            "last_scraped": datetime.now(timezone.utc).isoformat(),
-        }).execute()
+        try:
+            supabase.table("job_pool").insert({
+                "title": title[:200],
+                "company": company[:100],
+                "location": item.get("location", "UAE"),
+                "posted_at": posted_at,
+                "link": link,
+                "platform": platform[:100],
+                "description": description,
+                "search_keyword": normalized,
+                "salary": item.get("salary", ""),
+                "last_scraped": datetime.now(timezone.utc).isoformat(),
+            }).execute()
+            existing_links.add(link)
+            saved += 1
+        except Exception as e:
+            log(f"  ⚠️ Save error: {e}")
 
-        existing_links.add(link)
-        saved += 1
+    supabase.table("title_pool").update({
+        "last_scraped": datetime.now(timezone.utc).isoformat()
+    }).eq("normalized", normalized).execute()
 
-    supabase.table("title_pool")\
-        .update({"last_scraped": datetime.now(timezone.utc).isoformat()})\
-        .eq("normalized", normalized)\
-        .execute()
-
-    print(f"  💾 Saved {saved} new jobs for '{keyword}'")
+    log(f"  💾 Saved {saved} new jobs for '{keyword}'")
     return saved
 
 
 # ── Main entry points ──────────────────────────────────────────────────────
-def search_jobs(keyword, user_gender=None):
-    """
-    Main function: given a keyword, return jobs filtered by gender.
-    Checks pool first, scrapes if stale/new (respects daily ceiling).
-    """
+def search_jobs(keyword, user_gender=None, logger=None):
+    def log(msg):
+        if logger:
+            logger.add(msg)
+        else:
+            print(msg)
+
     if not validate_title(keyword):
-        print(f"  ❌ Invalid title rejected: '{keyword}'")
+        log(f"❌ Invalid title rejected: '{keyword}'")
         return []
 
-    print(f"\n🔍 Searching: '{keyword}'")
-
+    log(f"🔍 Searching: '{keyword}'")
     title_record, is_new = get_or_create_title(keyword)
     last_scraped = title_record.get("last_scraped")
 
-    if not is_fresh(last_scraped):
-        if is_over_daily_ceiling():
-            print(f"  ⚠️ Ceiling hit — returning stale cache for '{keyword}'")
-        else:
-            print(f"  🌐 Cache miss — scraping DataForSEO...")
-            items = dataforseo_search(keyword)
-            if items:
-                save_jobs(keyword, items)
+    if is_fresh(last_scraped):
+        log(f"  ✅ Cache fresh — last scraped {str(last_scraped)[:16]}")
+        jobs = get_cached_jobs(keyword)
+    elif is_over_daily_ceiling():
+        log(f"  ⚠️ Daily ceiling hit — returning stale cache")
+        jobs = get_cached_jobs(keyword)
+    else:
+        log(f"  🌐 Cache miss — scraping DataForSEO...")
+        items = dataforseo_search(keyword, logger=logger)
+        if items:
+            saved = save_jobs(keyword, items, logger=logger)
+            if logger:
+                logger.total_scraped += 1
+                logger.total_saved += saved
+        jobs = get_cached_jobs(keyword)
 
-    jobs = get_cached_jobs(keyword)
-
-    # Apply gender filter
     if user_gender and user_gender != "prefer_not_to_say":
         before = len(jobs)
-        jobs = [
-            j for j in jobs
-            if not is_gender_restricted(
-                f"{j.get('title','')} {j.get('description','')}", user_gender
-            )
-        ]
+        jobs = [j for j in jobs if not is_gender_restricted(
+            f"{j.get('title','')} {j.get('description','')}", user_gender
+        )]
         filtered = before - len(jobs)
         if filtered:
-            print(f"  🚫 Filtered {filtered} gender-restricted jobs")
+            log(f"  🚫 Filtered {filtered} gender-restricted jobs")
 
     return jobs
 
 
-def search_and_score_for_user(user):
-    """
-    Run all of a user's titles, score results against their profile,
-    save matches to user_job_matches table.
-    Returns list of scored jobs with score >= 60.
-    """
+def run_full_scrape():
+    """Run scraper for all titles in pool with full logging"""
+    logger = RunLogger("full_scrape")
+    logger.add("🚀 Full scrape started")
+
+    try:
+        titles = supabase.table("title_pool").select("*").execute().data or []
+        if not titles:
+            logger.add("ℹ️ No titles in pool")
+            logger.finish(success=True)
+            return logger.log_id
+
+        logger.add(f"📋 Found {len(titles)} titles to process")
+
+        for i, t in enumerate(titles, 1):
+            logger.add(f"\n[{i}/{len(titles)}] {t['keyword']}")
+            search_jobs(t["keyword"], logger=logger)
+
+        logger.add(f"\n✅ Full scrape complete — {logger.total_scraped} scraped, {logger.total_saved} new jobs saved")
+        logger.finish(success=True)
+
+    except Exception as e:
+        logger.add(f"\n❌ Fatal error: {e}")
+        logger.finish(success=False, error=e)
+
+    return logger.log_id
+
+
+def search_and_score_for_user(user, logger=None):
+    def log(msg):
+        if logger:
+            logger.add(msg)
+        else:
+            print(msg)
+
     user_id = user.get("id")
     user_gender = user.get("gender")
 
-    # Get user's selected titles
-    title_links = supabase.table("user_titles")\
-        .select("title_id")\
-        .eq("user_id", user_id)\
-        .execute()
-
+    title_links = supabase.table("user_titles").select("title_id").eq("user_id", user_id).execute()
     if not title_links.data:
-        print(f"  No titles for user {user_id}")
+        log(f"  No titles for user {user_id}")
         return []
 
     title_ids = [t["title_id"] for t in title_links.data]
-    titles = supabase.table("title_pool")\
-        .select("keyword")\
-        .in_("id", title_ids)\
-        .execute()
+    titles = supabase.table("title_pool").select("keyword").in_("id", title_ids).execute()
 
     all_jobs = []
     for t in (titles.data or []):
-        jobs = search_jobs(t["keyword"], user_gender=user_gender)
+        jobs = search_jobs(t["keyword"], user_gender=user_gender, logger=logger)
         all_jobs.extend(jobs)
 
     if not all_jobs:
         return []
 
-    # Score all jobs
-    print(f"  🤖 Scoring {len(all_jobs)} jobs for user {user_id}...")
+    log(f"  🤖 Scoring {len(all_jobs)} jobs...")
     scored_jobs = score_jobs_for_user(all_jobs, user)
 
-    # Save matches to DB
     matched = []
     for job in scored_jobs:
         score = job.get("score", 0)
@@ -515,18 +539,14 @@ def search_and_score_for_user(user):
                 "emailed": score >= 60
             }, on_conflict="user_id,job_id").execute()
         except Exception as e:
-            print(f"    ⚠️ Match save error: {e}")
-
+            log(f"  ⚠️ Match save error: {e}")
         if score >= 60:
             matched.append(job)
 
     matched.sort(key=lambda x: x.get("score", 0), reverse=True)
-    print(f"  ✅ {len(matched)} jobs at 60%+ for user {user_id}")
+    log(f"  ✅ {len(matched)} jobs at 60%+ match")
     return matched
 
 
 if __name__ == "__main__":
-    jobs = search_jobs("area manager UAE")
-    print(f"\nTotal: {len(jobs)} jobs")
-    for j in jobs[:3]:
-        print(f"  - {j['title']} @ {j['company']}")
+    run_full_scrape()

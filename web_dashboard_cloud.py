@@ -39,32 +39,35 @@ HTML_TEMPLATE = """
         .btn-primary { background: #2563eb; color: white; }
         .btn-primary:hover { background: #1d4ed8; }
         .btn-success { background: #059669; color: white; }
-        .btn-success:hover { background: #047857; }
+        .btn-danger { background: #dc2626; color: white; }
         .btn-sm { padding: 6px 12px; font-size: 13px; }
         table { width: 100%; border-collapse: collapse; }
         th { text-align: left; font-size: 12px; font-weight: 600; color: #64748b; text-transform: uppercase; padding: 8px 12px; border-bottom: 2px solid #f1f5f9; }
-        td { padding: 12px; border-bottom: 1px solid #f8fafc; font-size: 14px; }
+        td { padding: 12px; border-bottom: 1px solid #f8fafc; font-size: 14px; vertical-align: top; }
         tr:hover td { background: #f8fafc; }
         .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
         .badge-high { background: #dcfce7; color: #166534; }
         .badge-mid { background: #fef9c3; color: #854d0e; }
         .badge-low { background: #fee2e2; color: #991b1b; }
         .badge-none { background: #f1f5f9; color: #64748b; }
+        .badge-running { background: #dbeafe; color: #1d4ed8; }
+        .badge-error { background: #fee2e2; color: #991b1b; }
         .platform { font-size: 12px; color: #64748b; }
         .filter-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
         .filter-row input, .filter-row select { padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 14px; }
-        .truncate { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .scrape-log { background: #0f172a; color: #94a3b8; border-radius: 8px; padding: 16px; font-family: monospace; font-size: 13px; max-height: 300px; overflow-y: auto; margin-top: 16px; }
-        .scrape-log .ok { color: #4ade80; }
-        .scrape-log .err { color: #f87171; }
-        .scrape-log .info { color: #60a5fa; }
-        .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 6px; }
+        .truncate { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .log-box { background: #0f172a; color: #94a3b8; border-radius: 8px; padding: 16px; font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto; margin-top: 12px; white-space: pre-wrap; line-height: 1.6; }
+        .log-box .ok { color: #4ade80; }
+        .log-box .err { color: #f87171; }
+        .log-box .warn { color: #fbbf24; }
+        .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 6px; }
         @keyframes spin { to { transform: rotate(360deg); } }
         .tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 2px solid #e2e8f0; }
         .tab { padding: 10px 20px; cursor: pointer; font-size: 14px; font-weight: 500; color: #64748b; border-bottom: 2px solid transparent; margin-bottom: -2px; }
         .tab.active { color: #2563eb; border-bottom-color: #2563eb; }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
+        .log-preview { font-family: monospace; font-size: 11px; color: #64748b; max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     </style>
 </head>
 <body>
@@ -74,27 +77,29 @@ HTML_TEMPLATE = """
         <small style="opacity:0.8;font-size:13px;">Backend dashboard — not visible to users</small>
     </div>
     <div style="text-align:right">
-        <div style="font-size:13px;opacity:0.9">{{ stats.total_jobs }} jobs in pool</div>
-        <div style="font-size:12px;opacity:0.7">{{ stats.total_titles }} active titles</div>
+        <div style="font-size:13px;opacity:0.9">{{ stats.total_jobs }} jobs · {{ stats.total_titles }} titles</div>
+        <div style="font-size:12px;opacity:0.7">{{ stats.total_users }} users · {{ stats.scraped_today }} scraped today</div>
     </div>
 </div>
 
 <div class="container">
     <div class="stats-grid">
-        <div class="stat-card"><div class="value">{{ stats.total_jobs }}</div><div class="label">Total Jobs in Pool</div></div>
-        <div class="stat-card"><div class="value">{{ stats.total_titles }}</div><div class="label">Title Pool Size</div></div>
-        <div class="stat-card"><div class="value">{{ stats.total_users }}</div><div class="label">Registered Users</div></div>
+        <div class="stat-card"><div class="value">{{ stats.total_jobs }}</div><div class="label">Jobs in Pool</div></div>
+        <div class="stat-card"><div class="value">{{ stats.total_titles }}</div><div class="label">Active Titles</div></div>
+        <div class="stat-card"><div class="value">{{ stats.total_users }}</div><div class="label">Users</div></div>
         <div class="stat-card"><div class="value">{{ stats.scraped_today }}</div><div class="label">Scraped Today</div></div>
-        <div class="stat-card"><div class="value">{{ stats.jobs_with_scores }}</div><div class="label">Scored Jobs</div></div>
+        <div class="stat-card"><div class="value">{{ stats.total_logs }}</div><div class="label">Scrape Runs</div></div>
     </div>
 
     <div class="tabs">
         <div class="tab active" onclick="showTab('jobs')">Job Pool</div>
-        <div class="tab" onclick="showTab('titles')">Title Pool</div>
+        <div class="tab" onclick="showTab('titles')">Titles</div>
         <div class="tab" onclick="showTab('users')">Users</div>
         <div class="tab" onclick="showTab('scraper')">Run Scraper</div>
+        <div class="tab" onclick="showTab('logs')">Logs</div>
     </div>
 
+    <!-- Jobs Tab -->
     <div id="tab-jobs" class="tab-content active">
         <div class="card">
             <div class="filter-row">
@@ -135,6 +140,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
+    <!-- Titles Tab -->
     <div id="tab-titles" class="tab-content">
         <div class="card">
             <table>
@@ -149,7 +155,7 @@ HTML_TEMPLATE = """
                     <td>
                         {% if t.last_scraped and t.last_scraped[:10] == today %}<span class="badge badge-high">Fresh</span>
                         {% elif t.last_scraped %}<span class="badge badge-mid">Stale</span>
-                        {% else %}<span class="badge badge-none">New</span>{% endif %}
+                        {% else %}<span class="badge badge-none">Never scraped</span>{% endif %}
                     </td>
                 </tr>
                 {% endfor %}
@@ -158,6 +164,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
+    <!-- Users Tab -->
     <div id="tab-users" class="tab-content">
         <div class="card">
             <table>
@@ -179,27 +186,74 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
+    <!-- Scraper Tab -->
     <div id="tab-scraper" class="tab-content">
         <div class="card">
             <h2>Run Scraper</h2>
             <p style="color:#64748b;font-size:14px;margin-bottom:16px;">
-                Scrapes all active titles. Respects 24h cache. Daily ceiling: <strong>200 scrapes</strong>.
+                Scrapes all active titles. Respects 24h cache. Daily ceiling: <strong>200 scrapes</strong>.<br>
+                Runs in background — check the <strong>Logs tab</strong> for progress.
             </p>
             <div style="display:flex;gap:12px;flex-wrap:wrap;">
                 <button class="btn btn-primary" onclick="runScraper(this)">▶ Run Scraper Now</button>
                 <button class="btn btn-success" onclick="runScoringEmail(this)">🤖 Score + Email All Users</button>
             </div>
-            <div id="scrapeLog" class="scrape-log" style="display:none;"></div>
+            <div id="scraperMsg" style="margin-top:16px;font-size:14px;color:#64748b;display:none;"></div>
+        </div>
+    </div>
+
+    <!-- Logs Tab -->
+    <div id="tab-logs" class="tab-content">
+        <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                <h2 style="margin:0">Scrape Run Logs</h2>
+                <button class="btn btn-primary btn-sm" onclick="loadLogs()">↻ Refresh</button>
+            </div>
+            <table id="logsTable">
+                <thead><tr><th>#</th><th>Started</th><th>Finished</th><th>Status</th><th>Scraped</th><th>Saved</th><th>Log</th></tr></thead>
+                <tbody>
+                {% for log in logs %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ log.started_at[:16].replace('T',' ') if log.started_at else '—' }}</td>
+                    <td>{{ log.finished_at[:16].replace('T',' ') if log.finished_at else '—' }}</td>
+                    <td>
+                        {% if log.status == 'success' %}<span class="badge badge-high">✅ success</span>
+                        {% elif log.status == 'error' %}<span class="badge badge-error">❌ error</span>
+                        {% elif log.status == 'running' %}<span class="badge badge-running">⏳ running</span>
+                        {% else %}<span class="badge badge-none">{{ log.status }}</span>{% endif %}
+                    </td>
+                    <td>{{ log.total_scraped or 0 }}</td>
+                    <td>{{ log.total_saved or 0 }}</td>
+                    <td>
+                        <button class="btn btn-primary btn-sm" onclick="showLog('{{ log.id }}')">View Log</button>
+                        {% if log.error %}<span style="color:#dc2626;font-size:12px;margin-left:8px;">{{ log.error[:60] }}</span>{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+                {% if not logs %}
+                <tr><td colspan="7" style="text-align:center;color:#94a3b8;padding:32px;">No logs yet — run the scraper first</td></tr>
+                {% endif %}
+                </tbody>
+            </table>
+        </div>
+        <div id="logDetail" style="display:none;" class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                <h2 style="margin:0">Log Detail</h2>
+                <button class="btn btn-sm" style="background:#f1f5f9;color:#64748b;" onclick="document.getElementById('logDetail').style.display='none'">✕ Close</button>
+            </div>
+            <div id="logDetailContent" class="log-box">Loading...</div>
         </div>
     </div>
 </div>
 
 <script>
 function showTab(name) {
-    const names = ['jobs','titles','users','scraper'];
+    const names = ['jobs','titles','users','scraper','logs'];
     document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', names[i] === name));
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
     document.getElementById('tab-' + name).classList.add('active');
+    if (name === 'logs') loadLogs();
 }
 
 function filterJobs() {
@@ -211,50 +265,87 @@ function filterJobs() {
     });
 }
 
-function log(msg, type) {
-    const el = document.getElementById('scrapeLog');
-    el.style.display = 'block';
-    el.innerHTML += `<div class="${type || 'info'}">${msg}</div>`;
-    el.scrollTop = el.scrollHeight;
-}
-
 function runScraper(btn) {
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> Starting...';
-    document.getElementById('scrapeLog').innerHTML = '';
-    log('🚀 Scraper started in background — this takes 1-2 minutes per title', 'info');
-    log('⏳ Check the Job Pool tab after 2-3 minutes...', 'info');
-    fetch('/api/run-scraper', {method: 'POST'})
+    const msg = document.getElementById('scraperMsg');
+    msg.style.display = 'block';
+    msg.innerHTML = '⏳ Scraper started in background. Check the <strong>Logs tab</strong> for live progress — refresh every 30 seconds.';
+    fetch('/api/run-scraper', {method:'POST'})
         .then(r => r.json())
         .then(d => {
-            log('✅ Scraper triggered successfully', 'ok');
             btn.disabled = false;
             btn.innerHTML = '▶ Run Scraper Now';
-            setTimeout(() => location.reload(), 3000);
+            msg.innerHTML = '✅ Scraper running — <a href="#" onclick="showTab(\'logs\')">View Logs</a>';
         })
         .catch(e => {
-            log('❌ Error: ' + e, 'err');
             btn.disabled = false;
             btn.innerHTML = '▶ Run Scraper Now';
+            msg.innerHTML = '❌ Error: ' + e;
         });
 }
 
 function runScoringEmail(btn) {
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> Processing...';
-    document.getElementById('scrapeLog').innerHTML = '';
-    log('🤖 Scoring and emailing users...', 'info');
-    fetch('/api/score-and-email', {method: 'POST'})
+    const msg = document.getElementById('scraperMsg');
+    msg.style.display = 'block';
+    msg.innerHTML = '⏳ Scoring and emailing users...';
+    fetch('/api/score-and-email', {method:'POST'})
         .then(r => r.json())
         .then(d => {
-            d.log.forEach(l => log(l, l.includes('✅') ? 'ok' : l.includes('❌') ? 'err' : 'info'));
             btn.disabled = false;
             btn.innerHTML = '🤖 Score + Email All Users';
+            msg.innerHTML = d.log.map(l => `<div>${l}</div>`).join('');
         })
         .catch(e => {
-            log('❌ Error: ' + e, 'err');
             btn.disabled = false;
             btn.innerHTML = '🤖 Score + Email All Users';
+            msg.innerHTML = '❌ Error: ' + e;
+        });
+}
+
+function loadLogs() {
+    fetch('/api/logs')
+        .then(r => r.json())
+        .then(d => {
+            const tbody = document.querySelector('#logsTable tbody');
+            if (!d.logs || d.logs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#94a3b8;padding:32px;">No logs yet</td></tr>';
+                return;
+            }
+            tbody.innerHTML = d.logs.map((log, i) => `
+                <tr>
+                    <td>${i+1}</td>
+                    <td>${(log.started_at||'').slice(0,16).replace('T',' ')}</td>
+                    <td>${(log.finished_at||'—').slice(0,16).replace('T',' ')}</td>
+                    <td>${statusBadge(log.status)}</td>
+                    <td>${log.total_scraped||0}</td>
+                    <td>${log.total_saved||0}</td>
+                    <td><button class="btn btn-primary btn-sm" onclick="showLog('${log.id}')">View</button>
+                    ${log.error ? `<span style="color:#dc2626;font-size:12px;margin-left:8px;">${log.error.slice(0,60)}</span>` : ''}</td>
+                </tr>`).join('');
+        });
+}
+
+function statusBadge(status) {
+    if (status === 'success') return '<span class="badge badge-high">✅ success</span>';
+    if (status === 'error') return '<span class="badge badge-error">❌ error</span>';
+    if (status === 'running') return '<span class="badge badge-running">⏳ running</span>';
+    return `<span class="badge badge-none">${status}</span>`;
+}
+
+function showLog(id) {
+    const detail = document.getElementById('logDetail');
+    const content = document.getElementById('logDetailContent');
+    detail.style.display = 'block';
+    content.textContent = 'Loading...';
+    detail.scrollIntoView({behavior:'smooth'});
+    fetch('/api/logs/' + id)
+        .then(r => r.json())
+        .then(d => {
+            content.textContent = d.log_text || 'No log content';
+            content.scrollTop = content.scrollHeight;
         });
 }
 </script>
@@ -267,26 +358,28 @@ def load_dashboard_data():
         jobs = supabase.table("job_pool").select("*").order("created_at", desc=True).limit(200).execute().data or []
         titles = supabase.table("title_pool").select("*").order("request_count", desc=True).execute().data or []
         users = supabase.table("users").select("id,name,email,gender,cv_text,is_active,created_at").order("created_at", desc=True).execute().data or []
+        logs = supabase.table("scrape_logs").select("id,started_at,finished_at,status,total_scraped,total_saved,error").order("started_at", desc=True).limit(20).execute().data or []
         today = datetime.now(timezone.utc).date().isoformat()
         scraped_today = len([t for t in titles if t.get("last_scraped", "")[:10] == today])
-        jobs_with_scores = len([j for j in jobs if j.get("score")])
         stats = {
             "total_jobs": len(jobs),
             "total_titles": len(titles),
             "total_users": len(users),
             "scraped_today": scraped_today,
-            "jobs_with_scores": jobs_with_scores,
+            "jobs_with_scores": len([j for j in jobs if j.get("score")]),
+            "total_logs": len(logs),
         }
-        return jobs, titles, users, stats, today
+        return jobs, titles, users, logs, stats, today
     except Exception as e:
         print(f"Dashboard load error: {e}")
-        return [], [], [], {"total_jobs":0,"total_titles":0,"total_users":0,"scraped_today":0,"jobs_with_scores":0}, ""
+        import traceback; traceback.print_exc()
+        return [], [], [], [], {"total_jobs":0,"total_titles":0,"total_users":0,"scraped_today":0,"jobs_with_scores":0,"total_logs":0}, ""
 
 
 @app.route('/')
 def dashboard():
-    jobs, titles, users, stats, today = load_dashboard_data()
-    return render_template_string(HTML_TEMPLATE, jobs=jobs, titles=titles, users=users, stats=stats, today=today)
+    jobs, titles, users, logs, stats, today = load_dashboard_data()
+    return render_template_string(HTML_TEMPLATE, jobs=jobs, titles=titles, users=users, logs=logs, stats=stats, today=today)
 
 
 @app.route('/health')
@@ -294,47 +387,66 @@ def health():
     return jsonify({"status": "ok", "time": datetime.now(timezone.utc).isoformat()})
 
 
+@app.route('/api/logs')
+def api_logs():
+    try:
+        logs = supabase.table("scrape_logs").select("id,started_at,finished_at,status,total_scraped,total_saved,error").order("started_at", desc=True).limit(20).execute().data or []
+        return jsonify({"logs": logs})
+    except Exception as e:
+        return jsonify({"error": str(e), "logs": []})
+
+
+@app.route('/api/logs/<log_id>')
+def api_log_detail(log_id):
+    try:
+        result = supabase.table("scrape_logs").select("log_text,status,error").eq("id", log_id).execute()
+        if result.data:
+            return jsonify(result.data[0])
+        return jsonify({"error": "Not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/run-scraper', methods=['POST'])
 def api_run_scraper():
     def do_scrape():
-        from scraper_v2 import search_jobs
-        try:
-            titles = supabase.table("title_pool").select("*").execute().data or []
-            if not titles:
-                print("No titles in pool yet")
-                return
-            for t in titles:
-                print(f"Scraping: {t['keyword']}")
-                search_jobs(t["keyword"])
-                print(f"Done: {t['keyword']}")
-        except Exception as e:
-            print(f"Background scrape error: {e}")
+        from scraper_v2 import run_full_scrape
+        run_full_scrape()
 
     threading.Thread(target=do_scrape, daemon=True).start()
-    return jsonify({"log": ["🚀 Scraper running in background"], "total_saved": 0})
+    return jsonify({"status": "started", "message": "Scraper running in background — check Logs tab"})
 
 
 @app.route('/api/score-and-email', methods=['POST'])
 def api_score_and_email():
-    from scraper_v2 import search_and_score_for_user
+    from scraper_v2 import search_and_score_for_user, RunLogger
     from email_service import send_job_matches_email
-    log = []
+    log_lines = []
+
     try:
+        logger = RunLogger("score_and_email")
         users = supabase.table("users").select("*").eq("is_active", True).execute().data or []
         if not users:
-            log.append("ℹ️ No active users yet")
-            return jsonify({"log": log})
+            logger.add("ℹ️ No active users yet")
+            logger.finish(success=True)
+            return jsonify({"log": ["ℹ️ No active users yet"]})
+
         for user in users:
-            log.append(f"👤 Processing {user.get('name') or user.get('email')}")
-            matched = search_and_score_for_user(user)
+            logger.add(f"👤 {user.get('name') or user.get('email')}")
+            matched = search_and_score_for_user(user, logger=logger)
             if matched:
                 sent = send_job_matches_email(user["email"], user.get("name"), matched)
-                log.append(f"  ✅ {len(matched)} matches — email {'sent ✉️' if sent else 'failed ❌'}")
+                msg = f"  ✅ {len(matched)} matches — email {'sent ✉️' if sent else 'failed ❌'}"
             else:
-                log.append(f"  ℹ️ No 60%+ matches found")
+                msg = "  ℹ️ No 60%+ matches"
+            logger.add(msg)
+            log_lines.append(msg)
+
+        logger.finish(success=True)
     except Exception as e:
-        log.append(f"❌ Error: {str(e)}")
-    return jsonify({"log": log})
+        log_lines.append(f"❌ Error: {str(e)}")
+
+    return jsonify({"log": log_lines})
 
 
 @app.route('/api/generate-cv', methods=['POST'])
@@ -350,7 +462,7 @@ def api_generate_cv():
         user = supabase.table("users").select("*").eq("id", user_id).execute().data
         job = supabase.table("job_pool").select("*").eq("id", job_id).execute().data
         if not user or not job:
-            return jsonify({"error": "User or job not found"}), 404
+            return jsonify({"error": "Not found"}), 404
         user, job = user[0], job[0]
         cover_letter, tailored_cv = generate_cv_cover_letter(user, job)
         if not cover_letter and not tailored_cv:
@@ -374,7 +486,7 @@ def api_add_title():
     if not user_id or not keyword:
         return jsonify({"error": "user_id and keyword required"}), 400
     if not validate_title(keyword):
-        return jsonify({"error": "Invalid job title — must be at least 3 characters and contain letters"}), 400
+        return jsonify({"error": "Invalid title — must be 3+ characters and contain letters"}), 400
     existing = supabase.table("user_titles").select("id").eq("user_id", user_id).execute()
     if len(existing.data or []) >= 5:
         return jsonify({"error": "Maximum 5 job titles allowed"}), 400
@@ -384,14 +496,11 @@ def api_add_title():
         title_record = title_result.data[0]
     else:
         title_record = supabase.table("title_pool").insert({
-            "keyword": keyword,
-            "normalized": normalized,
-            "request_count": 0
+            "keyword": keyword, "normalized": normalized, "request_count": 0
         }).execute().data[0]
     try:
         supabase.table("user_titles").insert({
-            "user_id": user_id,
-            "title_id": title_record["id"]
+            "user_id": user_id, "title_id": title_record["id"]
         }).execute()
     except:
         pass
@@ -400,7 +509,7 @@ def api_add_title():
         gender = user_data[0].get("gender") if user_data else None
         search_jobs(keyword, user_gender=gender)
     threading.Thread(target=background_scrape, daemon=True).start()
-    return jsonify({"success": True, "title_id": title_record["id"], "message": "Title added — scraping in background"})
+    return jsonify({"success": True, "title_id": title_record["id"], "message": "Added — scraping in background"})
 
 
 if __name__ == '__main__':
