@@ -524,6 +524,15 @@ def api_test_db():
         })
     except Exception as e:
         return jsonify({"error": str(e)})
+        
+@app.route('/api/test-load')
+def api_test_load():
+    try:
+        jobs = supabase.table("job_pool").select("*").order("created_at", desc=True).limit(200).execute()
+        return jsonify({"jobs": len(jobs.data or []), "sample": jobs.data[0] if jobs.data else None})
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "trace": traceback.format_exc()})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
