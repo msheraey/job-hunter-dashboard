@@ -362,10 +362,7 @@ def load_dashboard_data():
         jobs = supabase.table("job_pool").select("*").order("created_at", desc=True).limit(200).execute().data or []
         titles = supabase.table("title_pool").select("*").order("request_count", desc=True).execute().data or []
         users = supabase.table("users").select("id,name,email,gender,cv_text,is_active,created_at").order("created_at", desc=True).execute().data or []
-        try:
-    logs = supabase.table("scrape_logs").select("id,started_at,finished_at,status,total_scraped,total_saved,error").order("started_at", desc=True).limit(20).execute().data or []
-except:
-    logs = []
+        logs = supabase.table("scrape_logs").select("id,started_at,finished_at,status,total_scraped,total_saved,error").order("started_at", desc=True).limit(20).execute().data or []
         today = datetime.now(timezone.utc).date().isoformat()
         scraped_today = len([t for t in titles if t.get("last_scraped", "")[:10] == today])
         stats = {
@@ -514,28 +511,7 @@ def api_add_title():
         search_jobs(keyword, user_gender=gender)
     threading.Thread(target=background_scrape, daemon=True).start()
     return jsonify({"success": True, "title_id": title_record["id"]})
-@app.route('/api/test-db')
-def api_test_db():
-    try:
-        jobs = supabase.table("job_pool").select("id").limit(5).execute()
-        titles = supabase.table("title_pool").select("id").limit(5).execute()
-        return jsonify({
-            "jobs_count": len(jobs.data or []),
-            "titles_count": len(titles.data or []),
-            "supabase_url": SUPABASE_URL[:30] if SUPABASE_URL else "NOT SET",
-            "key_set": bool(SUPABASE_KEY)
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)})
-        
-@app.route('/api/test-load')
-def api_test_load():
-    try:
-        jobs = supabase.table("job_pool").select("*").order("created_at", desc=True).limit(200).execute()
-        return jsonify({"jobs": len(jobs.data or []), "sample": jobs.data[0] if jobs.data else None})
-    except Exception as e:
-        import traceback
-        return jsonify({"error": str(e), "trace": traceback.format_exc()})
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
