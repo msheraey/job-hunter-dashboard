@@ -44,9 +44,9 @@ def dashboard():
     for i, l in enumerate(logs, 1):
         s = l.get('status','')
         badge = f'<span style="background:{"#dcfce7;color:#166534" if s=="success" else "#fee2e2;color:#991b1b" if s=="error" else "#dbeafe;color:#1d4ed8"};padding:2px 8px;border-radius:20px;font-size:12px">{s}</span>'
-        logs_html += f'<tr><td>{i}</td><td>{(l.get("started_at") or "")[:16].replace("T"," ")}</td><td>{(l.get("finished_at") or "—")[:16].replace("T"," ")}</td><td>{badge}</td><td>{l.get("total_scraped",0)}</td><td>{l.get("total_saved",0)}</td><td><button onclick="showLog(\'{l.get('id','')}\')" style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">View</button></td></tr>'
+        logs_html += f'<tr><td>{i}</td><td>{(l.get("started_at") or "")[:16].replace("T"," ")}</td><td>{(l.get("finished_at") or "—")[:16].replace("T"," ")}</td><td>{badge}</td><td>{l.get("total_scraped",0)}</td><td>{l.get("total_saved",0)}</td><td><button onclick="showLog('" + l.get('id','') + "')" style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">View</button></td></tr>'
 
-    scraped_today = len([t for t in titles if (t.get("last_scraped") or "")[:10] == today])
+    scraped_today = len([t for t in titles if (t.get("last_scraped","") or "")[:10] == today])
 
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
