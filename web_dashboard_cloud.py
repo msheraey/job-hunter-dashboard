@@ -20,6 +20,18 @@ def build_dashboard_html():
             logs = supabase.table("scrape_logs").select("id,started_at,finished_at,status,total_scraped,total_saved,error").order("started_at", desc=True).limit(20).execute().data or []
         except:
             logs = []
+        try:
+            feedback = supabase.table("feedback").select("id,rating,comment,user_id,created_at").order("created_at", desc=True).limit(100).execute().data or []
+            # map user_id -> email for readability
+            fb_user_ids = [f["user_id"] for f in feedback if f.get("user_id")]
+            email_map = {}
+            if fb_user_ids:
+                fb_users = supabase.table("users").select("id,email").in_("id", fb_user_ids).execute().data or []
+                email_map = {u["id"]: u["email"] for u in fb_users}
+            for f in feedback:
+                f["email"] = email_map.get(f.get("user_id"), "anonymous")
+        except:
+            feedback = []
         today = datetime.now(timezone.utc).date().isoformat()
     except Exception as e:
         return "<h1>DB Error: " + str(e) + "</h1>"
@@ -106,6 +118,22 @@ def build_dashboard_html():
         )
     logs_html = "".join(rows) or '<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">No logs yet</td></tr>'
 
+    # Build feedback rows
+    rows = []
+    for i, f in enumerate(feedback, 1):
+        rating = f.get("rating") or 0
+        stars = "★" * int(rating) + "☆" * (5 - int(rating)) if rating else "—"
+        when = (f.get("created_at") or "")[:16].replace("T", " ")
+        comment = (f.get("comment") or "").replace("<", "&lt;").replace(">", "&gt;") or "—"
+        rows.append(
+            "<tr><td>" + str(i) + "</td>"
+            + "<td style=\"white-space:nowrap\">" + when + "</td>"
+            + "<td style=\"color:#f59e0b\">" + stars + "</td>"
+            + "<td>" + comment + "</td>"
+            + "<td style=\"font-size:12px;color:#64748b\">" + (f.get("email") or "anonymous") + "</td></tr>"
+        )
+    feedback_html = "".join(rows) or '<tr><td colspan="5" style="text-align:center;padding:32px;color:#94a3b8">No feedback yet</td></tr>'
+
     scraped_today = len([t for t in titles if (t.get("last_scraped") or "")[:10] == today])
 
     page = """<!DOCTYPE html>
@@ -155,6 +183,7 @@ input,select{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-si
     <div class="tab" onclick="show('users',this)">Users</div>
     <div class="tab" onclick="show('scraper',this)">Run Scraper</div>
     <div class="tab" onclick="show('logs',this)">Logs</div>
+    <div class="tab" onclick="show('feedback',this)">Feedback</div>
   </div>
   <div id="jobs" class="pane on card">
     <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">
@@ -195,6 +224,11 @@ input,select{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-si
       </div>
       <div id="lc" class="log-box">Loading...</div>
     </div>
+  </div>
+  <div id="feedback" class="pane card">
+    <h2 style="margin-bottom:16px">User Feedback</h2>
+    <table><thead><tr><th>#</th><th>Date</th><th>Rating</th><th>Comment</th><th>From</th></tr></thead>
+    <tbody>FEEDBACKHTML</tbody></table>
   </div>
 </div>
 <script>
@@ -267,6 +301,7 @@ function showLog(id){
     page = page.replace("TITLESHTML", titles_html)
     page = page.replace("USERSHTML", users_html)
     page = page.replace("LOGSHTML", logs_html)
+    page = page.replace("FEEDBACKHTML", feedback_html)
     return page
 
 
