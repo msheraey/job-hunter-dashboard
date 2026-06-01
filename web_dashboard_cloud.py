@@ -242,7 +242,7 @@ function loadLogs(){
       h+='<tr><td>'+(i+1)+'</td><td>'+((l.started_at||'').slice(0,16).replace('T',' '))+'</td><td>'+((l.finished_at||'').slice(0,16).replace('T',' '))+'</td>';
       h+='<td><span style="background:'+bg+';padding:2px 8px;border-radius:20px;font-size:12px">'+s+'</span></td>';
       h+='<td>'+(l.total_scraped||0)+'</td><td>'+(l.total_saved||0)+'</td>';
-      h+='<td><button onclick="showLog(\''+l.id+'\')" style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">View</button></td></tr>';
+      h+='<td><button onclick="showLog("+JSON.stringify(l.id)+")" style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">View</button></td></tr>';
     }
     b.innerHTML=h;
   });
