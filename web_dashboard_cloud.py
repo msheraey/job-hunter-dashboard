@@ -347,19 +347,59 @@ def api_generate_cv():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/refresh-matches', methods=['POST'])
+def api_refresh_matches():
+    from scraper_v2 import refresh_matches_for_user
+    data = request.json or {}
+    user_id = data.get("user_id")
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+    try:
+        user = supabase.table("users").select("*").eq("id", user_id).execute().data
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        result = refresh_matches_for_user(user[0])
+        return jsonify({
+            "matches": result["matches"],
+            "pending_titles": result["pending_titles"]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/add-title', methods=['POST'])
 def api_add_title():
     from scraper_v2 import validate_title, normalize_title, search_jobs
+    from datetime import timedelta
     data = request.json or {}
     user_id = data.get("user_id")
     keyword = (data.get("keyword") or "").strip()
+    is_signup = data.get("is_signup", False)  # signup bypasses the cooldown
     if not user_id or not keyword:
         return jsonify({"error": "user_id and keyword required"}), 400
     if not validate_title(keyword):
         return jsonify({"error": "Invalid title"}), 400
+
     existing = supabase.table("user_titles").select("id").eq("user_id", user_id).execute()
-    if len(existing.data or []) >= 5:
+    current_count = len(existing.data or [])
+    if current_count >= 5:
         return jsonify({"error": "Maximum 5 job titles allowed"}), 400
+
+    # 14-day cooldown on title changes (skipped during initial signup)
+    if not is_signup:
+        urow = supabase.table("users").select("titles_updated_at").eq("id", user_id).execute().data
+        if urow and urow[0].get("titles_updated_at"):
+            try:
+                last = datetime.fromisoformat(str(urow[0]["titles_updated_at"]).replace("Z", "+00:00"))
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                days_since = (datetime.now(timezone.utc) - last).days
+                if days_since < 14:
+                    days_left = 14 - days_since
+                    return jsonify({"error": f"You can update your titles again in {days_left} day(s)."}), 429
+            except:
+                pass
+
     normalized = normalize_title(keyword)
     title_result = supabase.table("title_pool").select("*").eq("normalized", normalized).execute()
     title_record = title_result.data[0] if title_result.data else supabase.table("title_pool").insert({"keyword": keyword, "normalized": normalized, "request_count": 0}).execute().data[0]
@@ -367,11 +407,39 @@ def api_add_title():
         supabase.table("user_titles").insert({"user_id": user_id, "title_id": title_record["id"]}).execute()
     except:
         pass
+
+    # Stamp the change time (only for non-signup edits)
+    if not is_signup:
+        supabase.table("users").update({"titles_updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", user_id).execute()
+
     def bg():
         ud = supabase.table("users").select("gender").eq("id", user_id).execute().data
         search_jobs(keyword, user_gender=ud[0].get("gender") if ud else None)
     threading.Thread(target=bg, daemon=True).start()
     return jsonify({"success": True, "title_id": title_record["id"]})
+
+
+@app.route('/api/can-edit-titles', methods=['POST'])
+def api_can_edit_titles():
+    """Returns whether the user can edit titles and days remaining if not."""
+    from datetime import timedelta
+    data = request.json or {}
+    user_id = data.get("user_id")
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+    try:
+        urow = supabase.table("users").select("titles_updated_at").eq("id", user_id).execute().data
+        if not urow or not urow[0].get("titles_updated_at"):
+            return jsonify({"can_edit": True, "days_left": 0})
+        last = datetime.fromisoformat(str(urow[0]["titles_updated_at"]).replace("Z", "+00:00"))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        days_since = (datetime.now(timezone.utc) - last).days
+        if days_since >= 14:
+            return jsonify({"can_edit": True, "days_left": 0})
+        return jsonify({"can_edit": False, "days_left": 14 - days_since})
+    except Exception as e:
+        return jsonify({"can_edit": True, "days_left": 0})
 
 
 if __name__ == '__main__':

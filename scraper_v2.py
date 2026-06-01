@@ -559,5 +559,106 @@ def search_and_score_for_user(user, logger=None):
     return matched
 
 
+def refresh_matches_for_user(user, logger=None):
+    """
+    Instant-refresh for a logged-in user:
+    1. Score jobs already in the pool for this user's titles that AREN'T scored yet (instant, cheap).
+    2. Return ALL the user's 60%+ matches from the DB immediately.
+    3. For titles with NO jobs in the pool yet (brand new), kick off a background scrape.
+    Returns: { "matches": [...], "pending_titles": [list of titles still being scraped] }
+    Only scores jobs not already scored for this user (no wasted AI calls on refresh).
+    """
+    import threading as _threading
+
+    def log(msg):
+        if logger:
+            logger.add(msg)
+        else:
+            print(msg)
+
+    user_id = user.get("id")
+    user_gender = user.get("gender")
+
+    title_links = supabase.table("user_titles").select("title_id").eq("user_id", user_id).execute()
+    if not title_links.data:
+        return {"matches": [], "pending_titles": []}
+
+    title_ids = [t["title_id"] for t in title_links.data]
+    titles = supabase.table("title_pool").select("keyword,normalized").in_("id", title_ids).execute()
+
+    # Which job_ids are already scored for this user (so we don't re-score)
+    existing = supabase.table("user_job_matches").select("job_id").eq("user_id", user_id).execute()
+    already_scored = {r["job_id"] for r in (existing.data or [])}
+
+    pending_titles = []
+    jobs_to_score = []
+    seen_links = set()
+
+    for t in (titles.data or []):
+        normalized = t["normalized"]
+        pooled = supabase.table("job_pool").select("*").eq("search_keyword", normalized).execute().data or []
+
+        if not pooled:
+            # Brand-new title with nothing in the pool yet — needs scraping
+            pending_titles.append(t["keyword"])
+            continue
+
+        # Gender filter + skip already-scored + dedup
+        for j in pooled:
+            if user_gender and user_gender != "prefer_not_to_say":
+                if is_gender_restricted(f"{j.get('title','')} {j.get('description','')}", user_gender):
+                    continue
+            if j["id"] in already_scored:
+                continue
+            link = j.get("link", "")
+            if link and link in seen_links:
+                continue
+            seen_links.add(link)
+            jobs_to_score.append(j)
+
+    # Score only the new (un-scored) pooled jobs
+    if jobs_to_score:
+        log(f"  🤖 Scoring {len(jobs_to_score)} new pooled jobs for user...")
+        scored = score_jobs_for_user(jobs_to_score, user)
+        for job in scored:
+            score = job.get("score", 0)
+            if score < 1:
+                continue
+            try:
+                supabase.table("user_job_matches").upsert({
+                    "user_id": user_id,
+                    "job_id": job["id"],
+                    "score": score,
+                    "emailed": False
+                }, on_conflict="user_id,job_id").execute()
+            except Exception as e:
+                log(f"  ⚠️ Match save error: {e}")
+
+    # Kick off background scrape for brand-new titles (non-blocking)
+    if pending_titles:
+        def _bg_scrape(titles_list, gender):
+            for kw in titles_list:
+                try:
+                    search_jobs(kw, user_gender=gender)
+                except Exception as e:
+                    print(f"  ❌ bg scrape error for {kw}: {e}")
+        _threading.Thread(target=_bg_scrape, args=(pending_titles, user_gender), daemon=True).start()
+        log(f"  🌐 Background scraping {len(pending_titles)} new titles: {pending_titles}")
+
+    # Return all the user's current 60%+ matches from DB
+    match_rows = supabase.table("user_job_matches").select("job_id,score").eq("user_id", user_id).gte("score", 60).execute().data or []
+    if not match_rows:
+        return {"matches": [], "pending_titles": pending_titles}
+
+    job_ids = [m["job_id"] for m in match_rows]
+    score_map = {m["job_id"]: m["score"] for m in match_rows}
+    jobs = supabase.table("job_pool").select("*").in_("id", job_ids).execute().data or []
+    for j in jobs:
+        j["score"] = score_map.get(j["id"], 0)
+    jobs.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+    return {"matches": jobs, "pending_titles": pending_titles}
+
+
 if __name__ == "__main__":
     run_full_scrape()
