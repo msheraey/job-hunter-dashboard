@@ -304,30 +304,63 @@ def score_jobs_for_user(jobs, user):
 
 # ── CV + Cover Letter ──────────────────────────────────────────────────────
 def generate_cv_cover_letter(user, job):
-    prompt = f"""Generate a tailored CV and cover letter for this UAE job application.
+    prompt = f"""You are an expert UAE career writer. Write a tailored cover letter and a tailored CV for this job application.
 
 JOB: {job.get('title')} at {job.get('company')}
+Location: {job.get('location', 'UAE')}
 Description: {job.get('description', '')[:800]}
 
-CANDIDATE:
+CANDIDATE PROFILE:
 {user.get('profile_summary', '')}
 
-CV: {user.get('cv_text', '')[:2000]}
+CANDIDATE CV:
+{user.get('cv_text', '')[:2500]}
 
-Return ONLY JSON:
-{{"cover_letter": "...", "tailored_cv": "..."}}"""
+Write a professional, specific cover letter (3-4 short paragraphs) and a tailored CV that highlights the most relevant experience for THIS role.
 
-    try:
+Format your response EXACTLY like this, using these exact delimiter lines:
+
+===COVER_LETTER===
+(the full cover letter here)
+===TAILORED_CV===
+(the full tailored CV here)
+===END==="""
+
+    def _call(model, max_tokens):
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "llama3-70b-8192", "messages": [{"role": "user", "content": prompt}], "max_tokens": 2000, "temperature": 0.3},
-            timeout=30
+            json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens, "temperature": 0.4},
+            timeout=60
         )
-        content = resp.json()["choices"][0]["message"]["content"].strip()
-        content = re.sub(r'```json|```', '', content).strip()
-        result = json.loads(content)
-        return result.get("cover_letter", ""), result.get("tailored_cv", "")
+        return resp.json()["choices"][0]["message"]["content"]
+
+    def _parse(text):
+        cover, cv = "", ""
+        if "===COVER_LETTER===" in text and "===TAILORED_CV===" in text:
+            after_cl = text.split("===COVER_LETTER===", 1)[1]
+            cover = after_cl.split("===TAILORED_CV===", 1)[0].strip()
+            after_cv = after_cl.split("===TAILORED_CV===", 1)[1]
+            cv = after_cv.split("===END===", 1)[0].strip()
+        return cover, cv
+
+    try:
+        content = _call("llama3-70b-8192", 3500)
+        cover, cv = _parse(content)
+        # Fallback: if delimiters missing, try to salvage by using the whole text as CV
+        if not cover and not cv:
+            # try JSON as a last resort
+            try:
+                cleaned = re.sub(r'```json|```', '', content).strip()
+                result = json.loads(cleaned)
+                cover = result.get("cover_letter", "")
+                cv = result.get("tailored_cv", "")
+            except:
+                pass
+        if not cover and not cv and content.strip():
+            # last-ditch: split roughly in half so the email isn't empty
+            cover = content.strip()
+        return cover, cv
     except Exception as e:
         print(f"❌ CV generation error: {e}")
         return "", ""
