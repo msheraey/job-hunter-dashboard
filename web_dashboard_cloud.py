@@ -74,12 +74,16 @@ def build_dashboard_html():
             status = '<span style="background:#fef9c3;color:#854d0e;padding:2px 8px;border-radius:20px;font-size:12px">Stale</span>'
         else:
             status = '<span style="background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:20px;font-size:12px">Never</span>'
-        rows.append("<tr><td>" + str(i) + "</td><td>" + (t.get("keyword") or "") + "</td><td>" + (ls or "Never") + "</td><td>" + str(t.get("request_count") or 0) + "</td><td>" + status + "</td></tr>")
-    titles_html = "".join(rows) or '<tr><td colspan="5" style="text-align:center;padding:32px;color:#94a3b8">No titles yet</td></tr>'
+        tid = json.dumps(t.get("id"))
+        del_btn = '<button onclick=\'delTitle(' + tid + ')\' style="background:#dc2626;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">Delete</button>'
+        rows.append("<tr><td>" + str(i) + "</td><td>" + (t.get("keyword") or "") + "</td><td>" + (ls or "Never") + "</td><td>" + str(t.get("request_count") or 0) + "</td><td>" + status + "</td><td>" + del_btn + "</td></tr>")
+    titles_html = "".join(rows) or '<tr><td colspan="6" style="text-align:center;padding:32px;color:#94a3b8">No titles yet</td></tr>'
 
     # Build users rows
     rows = []
     for i, u in enumerate(users, 1):
+        uid = json.dumps(u.get("id"))
+        del_btn = '<button onclick=\'delUser(' + uid + ')\' style="background:#dc2626;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">Delete</button>'
         rows.append(
             "<tr><td>" + str(i) + "</td>"
             + "<td>" + (u.get("name") or "&mdash;") + "</td>"
@@ -88,9 +92,10 @@ def build_dashboard_html():
             + "<td>" + ("&#10003;" if u.get("cv_text") else "&#10007;") + "</td>"
             + "<td>" + (u.get("created_at") or "")[:10] + "</td>"
             + "<td>" + ("&#10003;" if u.get("is_active") else "&#10007;") + "</td>"
+            + "<td>" + del_btn + "</td>"
             + "</tr>"
         )
-    users_html = "".join(rows) or '<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">No users yet</td></tr>'
+    users_html = "".join(rows) or '<tr><td colspan="8" style="text-align:center;padding:32px;color:#94a3b8">No users yet</td></tr>'
 
     # Build logs rows
     rows = []
@@ -194,11 +199,11 @@ input,select{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-si
     <tbody>JOBSHTML</tbody></table>
   </div>
   <div id="titles" class="pane card">
-    <table><thead><tr><th>#</th><th>Keyword</th><th>Last Scraped</th><th>Requests</th><th>Status</th></tr></thead>
+    <table><thead><tr><th>#</th><th>Keyword</th><th>Last Scraped</th><th>Requests</th><th>Status</th><th></th></tr></thead>
     <tbody>TITLESHTML</tbody></table>
   </div>
   <div id="users" class="pane card">
-    <table><thead><tr><th>#</th><th>Name</th><th>Email</th><th>Gender</th><th>CV</th><th>Joined</th><th>Active</th></tr></thead>
+    <table><thead><tr><th>#</th><th>Name</th><th>Email</th><th>Gender</th><th>CV</th><th>Joined</th><th>Active</th><th></th></tr></thead>
     <tbody>USERSHTML</tbody></table>
   </div>
   <div id="scraper" class="pane card">
@@ -278,7 +283,7 @@ function loadLogs(){
       h+='<tr><td>'+(i+1)+'</td><td>'+((l.started_at||'').slice(0,16).replace('T',' '))+'</td><td>'+((l.finished_at||'').slice(0,16).replace('T',' '))+'</td>';
       h+='<td><span style="background:'+bg+';padding:2px 8px;border-radius:20px;font-size:12px">'+s+'</span></td>';
       h+='<td>'+(l.total_scraped||0)+'</td><td>'+(l.total_saved||0)+'</td>';
-      h+='<td><button onclick="showLog("+JSON.stringify(l.id)+")" style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">View</button></td></tr>';
+      h+='<td><button onclick=\'showLog('+JSON.stringify(l.id)+')\' style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">View</button></td></tr>';
     }
     b.innerHTML=h;
   });
@@ -288,6 +293,20 @@ function showLog(id){
   d.style.display='block';c.textContent='Loading...';
   d.scrollIntoView({behavior:'smooth'});
   fetch('/api/logs/'+id).then(function(r){return r.json();}).then(function(d){c.textContent=d.log_text||'No content yet';c.scrollTop=c.scrollHeight;});
+}
+function delTitle(id){
+  if(!confirm('Delete this title from the pool? This cannot be undone.'))return;
+  fetch('/api/delete-title',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})
+    .then(function(r){return r.json();})
+    .then(function(d){if(d.ok){location.reload();}else{alert('Error: '+(d.error||'failed'));}})
+    .catch(function(e){alert('Error: '+e);});
+}
+function delUser(id){
+  if(!confirm('Delete this user and all their matches/titles links? This cannot be undone.'))return;
+  fetch('/api/delete-user',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})
+    .then(function(r){return r.json();})
+    .then(function(d){if(d.ok){location.reload();}else{alert('Error: '+(d.error||'failed'));}})
+    .catch(function(e){alert('Error: '+e);});
 }
 </script>
 </body></html>"""
@@ -475,6 +494,41 @@ def api_can_edit_titles():
         return jsonify({"can_edit": False, "days_left": 14 - days_since})
     except Exception as e:
         return jsonify({"can_edit": True, "days_left": 0})
+
+
+@app.route('/api/delete-title', methods=['POST'])
+def api_delete_title():
+    data = request.json or {}
+    tid = data.get("id")
+    if not tid:
+        return jsonify({"ok": False, "error": "id required"}), 400
+    try:
+        # remove any user links to this title first, then the title
+        supabase.table("user_titles").delete().eq("title_id", tid).execute()
+        supabase.table("title_pool").delete().eq("id", tid).execute()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route('/api/delete-user', methods=['POST'])
+def api_delete_user():
+    data = request.json or {}
+    uid = data.get("id")
+    if not uid:
+        return jsonify({"ok": False, "error": "id required"}), 400
+    try:
+        # clean up dependent rows first to avoid orphans
+        supabase.table("user_job_matches").delete().eq("user_id", uid).execute()
+        supabase.table("user_titles").delete().eq("user_id", uid).execute()
+        try:
+            supabase.table("feedback").delete().eq("user_id", uid).execute()
+        except Exception:
+            pass
+        supabase.table("users").delete().eq("id", uid).execute()
+        return jsonify({"ok": True, "note": "Removed from users table. Auth account (Supabase Auth) must be deleted separately if needed."})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 if __name__ == '__main__':
