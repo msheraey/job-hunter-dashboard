@@ -337,14 +337,15 @@ def score_jobs_for_user(jobs, user):
     MAX_SCORE_PER_REQUEST = 40
     to_score = jobs[:MAX_SCORE_PER_REQUEST]
     for job in to_score:
-        job["score"] = score_job_with_groq(
+        s = score_job_with_groq(
             job.get("title", ""), job.get("company", ""),
             job.get("description", ""), user_profile
         )
-    # Any jobs beyond the cap keep whatever score they had (or 0) this round
+        job["score"] = s if isinstance(s, int) else 0
+    # Any jobs beyond the cap get a 0 score this round (scored on next run)
     for job in jobs[MAX_SCORE_PER_REQUEST:]:
-        if "score" not in job:
-            job["score"] = job.get("score", 0)
+        if not isinstance(job.get("score"), int):
+            job["score"] = 0
     return jobs
 
 
@@ -618,7 +619,7 @@ def search_and_score_for_user(user, logger=None):
 
     matched = []
     for job in scored_jobs:
-        score = job.get("score", 0)
+        score = job.get("score", 0) or 0
         if score < 1:
             continue
         try:
@@ -700,7 +701,7 @@ def refresh_matches_for_user(user, logger=None):
         log(f"  🤖 Scoring {len(jobs_to_score)} new pooled jobs for user...")
         scored = score_jobs_for_user(jobs_to_score, user)
         for job in scored:
-            score = job.get("score", 0)
+            score = job.get("score", 0) or 0
             if score < 1:
                 continue
             try:
