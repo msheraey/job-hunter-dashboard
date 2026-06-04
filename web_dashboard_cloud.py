@@ -30,7 +30,9 @@ def build_dashboard_html():
                 email_map = {u["id"]: u["email"] for u in fb_users}
             for f in feedback:
                 f["email"] = email_map.get(f.get("user_id"), "anonymous")
-        except:
+            print(f"📋 Feedback loaded: {len(feedback)} rows")
+        except Exception as e:
+            print(f"❌ Feedback load error: {e}")
             feedback = []
         today = datetime.now(timezone.utc).date().isoformat()
     except Exception as e:
