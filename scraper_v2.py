@@ -235,6 +235,28 @@ def dataforseo_search(keyword, logger=None):
 
 
 # ── AI Scoring ─────────────────────────────────────────────────────────────
+def _extract_score(text):
+    """Pull an integer 0-100 score from any messy AI response."""
+    if not text:
+        return None
+    # Try JSON first
+    try:
+        cleaned = re.sub(r'```json|```', '', text).strip()
+        # grab first {...} block if present
+        m = re.search(r'\{[^}]*\}', cleaned, re.DOTALL)
+        if m:
+            val = json.loads(m.group(0)).get("score")
+            if val is not None:
+                return max(0, min(100, int(val)))
+    except Exception:
+        pass
+    # Fallback: first number 0-100 in the text
+    m = re.search(r'\b(\d{1,3})\b', text)
+    if m:
+        return max(0, min(100, int(m.group(1))))
+    return None
+
+
 def score_job_with_groq(job_title, job_company, job_description, user_profile):
     prompt = f"""You are a job matching expert. Score how well this job matches the candidate.
 
@@ -256,9 +278,18 @@ Score 0-100. Be strict."""
             json={"model": "llama3-8b-8192", "messages": [{"role": "user", "content": prompt}], "max_tokens": 100, "temperature": 0.1},
             timeout=15
         )
-        content = resp.json()["choices"][0]["message"]["content"].strip()
-        content = re.sub(r'```json|```', '', content).strip()
-        return int(json.loads(content).get("score", 0))
+        data = resp.json()
+        # Detect Groq error / rate-limit (no 'choices' key)
+        if "choices" not in data:
+            err = data.get("error", {})
+            msg = err.get("message", str(data)[:120]) if isinstance(err, dict) else str(err)[:120]
+            print(f"    ⚠️ Groq error ({resp.status_code}): {msg} — trying Haiku")
+            return score_job_with_haiku(job_title, job_company, job_description, user_profile)
+        content = data["choices"][0]["message"]["content"].strip()
+        score = _extract_score(content)
+        if score is None:
+            return score_job_with_haiku(job_title, job_company, job_description, user_profile)
+        return score
     except Exception as e:
         print(f"    ⚠️ Groq failed: {e} — trying Haiku")
         return score_job_with_haiku(job_title, job_company, job_description, user_profile)
@@ -277,9 +308,15 @@ Candidate: {user_profile[:500]}"""
             json={"model": "claude-haiku-4-5-20251001", "max_tokens": 50, "messages": [{"role": "user", "content": prompt}]},
             timeout=15
         )
-        content = resp.json()["content"][0]["text"].strip()
-        content = re.sub(r'```json|```', '', content).strip()
-        return int(json.loads(content).get("score", 0))
+        data = resp.json()
+        if "content" not in data:
+            err = data.get("error", {})
+            msg = err.get("message", str(data)[:120]) if isinstance(err, dict) else str(err)[:120]
+            print(f"    ❌ Haiku error ({resp.status_code}): {msg}")
+            return 0
+        content = data["content"][0]["text"].strip()
+        score = _extract_score(content)
+        return score if score is not None else 0
     except Exception as e:
         print(f"    ❌ Haiku also failed: {e}")
         return 0
@@ -294,11 +331,20 @@ def score_jobs_for_user(jobs, user):
     if not profile_parts:
         return jobs
     user_profile = "\n".join(profile_parts)
-    for job in jobs:
+    # Safety cap: scoring is synchronous and each job = an API call.
+    # Too many in one request blows the gunicorn worker timeout (300s).
+    # Cap per request; remaining jobs get scored on the next run/refresh.
+    MAX_SCORE_PER_REQUEST = 40
+    to_score = jobs[:MAX_SCORE_PER_REQUEST]
+    for job in to_score:
         job["score"] = score_job_with_groq(
             job.get("title", ""), job.get("company", ""),
             job.get("description", ""), user_profile
         )
+    # Any jobs beyond the cap keep whatever score they had (or 0) this round
+    for job in jobs[MAX_SCORE_PER_REQUEST:]:
+        if "score" not in job:
+            job["score"] = job.get("score", 0)
     return jobs
 
 
