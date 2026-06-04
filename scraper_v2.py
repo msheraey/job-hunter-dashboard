@@ -275,7 +275,7 @@ Score 0-100. Be strict."""
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "llama3-8b-8192", "messages": [{"role": "user", "content": prompt}], "max_tokens": 100, "temperature": 0.1},
+            json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": prompt}], "max_tokens": 100, "temperature": 0.1},
             timeout=15
         )
         data = resp.json()
@@ -392,7 +392,7 @@ Format your response EXACTLY like this, using these exact delimiter lines:
         return cover, cv
 
     try:
-        content = _call("llama3-70b-8192", 3500)
+        content = _call("llama-3.3-70b-versatile", 3500)
         cover, cv = _parse(content)
         # Fallback: if delimiters missing, try to salvage by using the whole text as CV
         if not cover and not cv:
