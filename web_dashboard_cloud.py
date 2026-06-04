@@ -370,25 +370,28 @@ def api_run_scraper():
 
 @app.route('/api/score-and-email', methods=['POST'])
 def api_score_and_email():
-    from scraper_v2 import search_and_score_for_user, RunLogger
-    from email_service import send_job_matches_email
-    log_lines = []
-    try:
-        logger = RunLogger("score_and_email")
-        users = supabase.table("users").select("*").eq("is_active", True).execute().data or []
-        if not users:
-            return jsonify({"log": ["No active users yet"]})
-        for user in users:
-            matched = search_and_score_for_user(user, logger=logger)
-            if matched:
-                sent = send_job_matches_email(user["email"], user.get("name"), matched)
-                log_lines.append(str(len(matched)) + " matches — email " + ("sent" if sent else "failed"))
-            else:
-                log_lines.append("No 60%+ matches for " + (user.get("email") or ""))
-        logger.finish(success=True)
-    except Exception as e:
-        log_lines.append("Error: " + str(e))
-    return jsonify({"log": log_lines})
+    def do_score_email():
+        from scraper_v2 import search_and_score_for_user, RunLogger
+        from email_service import send_job_matches_email
+        try:
+            logger = RunLogger("score_and_email")
+            users = supabase.table("users").select("*").eq("is_active", True).execute().data or []
+            for user in users:
+                try:
+                    matched = search_and_score_for_user(user, logger=logger)
+                    if matched:
+                        sent = send_job_matches_email(user["email"], user.get("name"), matched)
+                        logger.add(f"  ✉️ {user.get('email')}: {len(matched)} matches — email {'sent' if sent else 'failed'}")
+                    else:
+                        logger.add(f"  — {user.get('email')}: no 60%+ matches")
+                except Exception as ue:
+                    logger.add(f"  ❌ {user.get('email')}: {ue}")
+            logger.finish(success=True)
+        except Exception as e:
+            print(f"❌ score_and_email error: {e}")
+
+    threading.Thread(target=do_score_email, daemon=True).start()
+    return jsonify({"log": ["Scoring + emailing all active users in the background. Check the Logs tab in 1-2 minutes for results."]})
 
 
 @app.route('/api/generate-cv', methods=['POST'])
