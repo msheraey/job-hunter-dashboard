@@ -257,8 +257,38 @@ def _extract_score(text):
     return None
 
 
+INDUSTRY_LIST = [
+    "Healthcare & Pharmacy", "Retail", "FMCG", "Logistics & Supply Chain",
+    "Technology", "Finance & Banking", "Hospitality & Tourism",
+    "Real Estate", "Automotive", "Education", "Construction & Engineering",
+    "Media & Marketing", "HR & Recruitment", "Other"
+]
+
+def _extract_score_and_industry(text):
+    """Extract score (int) and industry (str) from AI response."""
+    score = None
+    industry = None
+    try:
+        cleaned = re.sub(r'```json|```', '', text).strip()
+        m = re.search(r'\{[^}]*\}', cleaned, re.DOTALL)
+        if m:
+            data = json.loads(m.group(0))
+            val = data.get("score")
+            if val is not None:
+                score = max(0, min(100, int(val)))
+            industry = data.get("industry")
+    except Exception:
+        pass
+    if score is None:
+        m = re.search(r'\b(\d{1,3})\b', text)
+        if m:
+            score = max(0, min(100, int(m.group(1))))
+    return score, industry
+
+
 def score_job_with_groq(job_title, job_company, job_description, user_profile):
-    prompt = f"""You are a job matching expert. Score how well this job matches the candidate.
+    industry_options = ", ".join(INDUSTRY_LIST)
+    prompt = f"""You are a job matching expert. Score how well this job matches the candidate and identify the job industry.
 
 JOB:
 Title: {job_title}
@@ -268,44 +298,45 @@ Description: {job_description[:500] if job_description else 'Not provided'}
 CANDIDATE:
 {user_profile}
 
-Return ONLY JSON: {{"score": 75, "reason": "brief reason"}}
-Score 0-100. Be strict."""
+Return ONLY JSON: {{"score": 75, "industry": "Retail", "reason": "brief reason"}}
+Score 0-100. Be strict. Industry must be exactly one of: {industry_options}"""
 
     try:
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": prompt}], "max_tokens": 100, "temperature": 0.1},
+            json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": prompt}], "max_tokens": 120, "temperature": 0.1},
             timeout=15
         )
         data = resp.json()
-        # Detect Groq error / rate-limit (no 'choices' key)
         if "choices" not in data:
             err = data.get("error", {})
             msg = err.get("message", str(data)[:120]) if isinstance(err, dict) else str(err)[:120]
             print(f"    ⚠️ Groq error ({resp.status_code}): {msg} — trying Haiku")
             return score_job_with_haiku(job_title, job_company, job_description, user_profile)
         content = data["choices"][0]["message"]["content"].strip()
-        score = _extract_score(content)
+        score, industry = _extract_score_and_industry(content)
         if score is None:
             return score_job_with_haiku(job_title, job_company, job_description, user_profile)
-        return score
+        return score, industry
     except Exception as e:
         print(f"    ⚠️ Groq failed: {e} — trying Haiku")
         return score_job_with_haiku(job_title, job_company, job_description, user_profile)
 
 
 def score_job_with_haiku(job_title, job_company, job_description, user_profile):
-    prompt = f"""Score this job match 0-100. Return only JSON: {{"score": N}}
+    industry_options = ", ".join(INDUSTRY_LIST)
+    prompt = f"""Score this job match 0-100 and identify the industry. Return only JSON: {{"score": N, "industry": "Industry Name"}}
+Industry must be one of: {industry_options}
 Job: {job_title} at {job_company}
-Description: {job_description[:300] if job_description else ''}
+Description: {job_description[:300] if job_description else ""}
 Candidate: {user_profile[:500]}"""
 
     try:
         resp = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 50, "messages": [{"role": "user", "content": prompt}]},
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 80, "messages": [{"role": "user", "content": prompt}]},
             timeout=15
         )
         data = resp.json()
@@ -313,13 +344,14 @@ Candidate: {user_profile[:500]}"""
             err = data.get("error", {})
             msg = err.get("message", str(data)[:120]) if isinstance(err, dict) else str(err)[:120]
             print(f"    ❌ Haiku error ({resp.status_code}): {msg}")
-            return 0
+            return 0, None
         content = data["content"][0]["text"].strip()
-        score = _extract_score(content)
-        return score if score is not None else 0
+        score, industry = _extract_score_and_industry(content)
+        return (score if score is not None else 0), industry
     except Exception as e:
         print(f"    ❌ Haiku also failed: {e}")
-        return 0
+        return 0, None
+
 
 
 def score_jobs_for_user(jobs, user):
@@ -331,22 +363,31 @@ def score_jobs_for_user(jobs, user):
     if not profile_parts:
         return jobs
     user_profile = "\n".join(profile_parts)
-    # Safety cap: scoring is synchronous and each job = an API call.
-    # Too many in one request blows the gunicorn worker timeout (300s).
-    # Cap per request; remaining jobs get scored on the next run/refresh.
     MAX_SCORE_PER_REQUEST = 40
     to_score = jobs[:MAX_SCORE_PER_REQUEST]
     for job in to_score:
-        s = score_job_with_groq(
+        result = score_job_with_groq(
             job.get("title", ""), job.get("company", ""),
             job.get("description", ""), user_profile
         )
-        job["score"] = s if isinstance(s, int) else 0
-    # Any jobs beyond the cap get a 0 score this round (scored on next run)
+        # result is now (score, industry) tuple
+        if isinstance(result, tuple):
+            score, industry = result
+        else:
+            score, industry = result, None
+        job["score"] = score if isinstance(score, int) else 0
+        # Write industry back to job_pool if not already set
+        if industry and job.get("id") and not job.get("industry"):
+            try:
+                supabase.table("job_pool").update({"industry": industry}).eq("id", job["id"]).is_("industry", "null").execute()
+                job["industry"] = industry
+            except Exception:
+                pass
     for job in jobs[MAX_SCORE_PER_REQUEST:]:
         if not isinstance(job.get("score"), int):
             job["score"] = 0
     return jobs
+
 
 
 # ── CV + Cover Letter ──────────────────────────────────────────────────────
