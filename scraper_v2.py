@@ -365,7 +365,7 @@ def score_jobs_for_user(jobs, user):
     user_profile = "\n".join(profile_parts)
     MAX_SCORE_PER_REQUEST = 40
     to_score = jobs[:MAX_SCORE_PER_REQUEST]
-    for job in to_score:
+    for i, job in enumerate(to_score):
         result = score_job_with_groq(
             job.get("title", ""), job.get("company", ""),
             job.get("description", ""), user_profile
@@ -383,6 +383,9 @@ def score_jobs_for_user(jobs, user):
                 job["industry"] = industry
             except Exception:
                 pass
+        # Small delay every 5 jobs to avoid hitting Groq TPM rate limit
+        if (i + 1) % 5 == 0:
+            time.sleep(1)
     for job in jobs[MAX_SCORE_PER_REQUEST:]:
         if not isinstance(job.get("score"), int):
             job["score"] = 0
