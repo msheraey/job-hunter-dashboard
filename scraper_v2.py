@@ -254,6 +254,15 @@ def move_old_jobs_to_archive(logger=None):
     log(f"📦 Moved {moved} jobs to old_jobs (older than {JOB_MAX_DAYS} days)")
     return moved
 
+def get_old_jobs(limit=100, offset=0):
+    """Retrieve old jobs from archive (for Old Jobs section in dashboard)"""
+    try:
+        result = supabase.table("old_jobs").select("*").order("moved_at", desc=True).limit(limit).offset(offset).execute()
+        return result.data or []
+    except Exception as e:
+        print(f"Error fetching old jobs: {e}")
+        return []
+
 # ── Logger class ───────────────────────────────────────────────────────────
 class RunLogger:
     def __init__(self, run_type="scraper"):
