@@ -519,6 +519,62 @@ def api_restore_job():
         return jsonify({"success": False, "message": str(e)})
 
 # ============================================================================
+# Skip / Applied job status
+# ============================================================================
+
+@app.route('/api/job-status', methods=['POST', 'OPTIONS'])
+def api_job_status():
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
+
+    data = request.json or {}
+    user_id = data.get("user_id")
+    job_id = data.get("job_id")
+    status = data.get("status")
+
+    if not user_id or not job_id or status not in ("new", "skipped", "applied"):
+        return jsonify({"success": False, "message": "Invalid parameters"}), 400
+
+    try:
+        supabase.table("user_job_matches").update({
+            "status": status,
+            "status_updated_at": datetime.now(timezone.utc).isoformat()
+        }).eq("user_id", user_id).eq("job_id", job_id).execute()
+        return jsonify({"success": True, "status": status})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route('/api/jobs-by-status', methods=['GET'])
+def api_jobs_by_status():
+    user_id = request.args.get("user_id")
+    status = request.args.get("status", "applied")
+
+    if not user_id:
+        return jsonify({"jobs": []})
+
+    try:
+        rows = supabase.table("user_job_matches") \
+            .select("job_id,score,match_reason,status,status_updated_at") \
+            .eq("user_id", user_id).eq("status", status).execute().data or []
+        if not rows:
+            return jsonify({"jobs": []})
+
+        job_ids = [r["job_id"] for r in rows]
+        meta = {r["job_id"]: r for r in rows}
+        jobs = supabase.table("job_pool").select("*").in_("id", job_ids).execute().data or []
+        for j in jobs:
+            m = meta.get(j["id"], {})
+            j["score"] = m.get("score", 0)
+            j["match_reason"] = m.get("match_reason")
+            j["status"] = m.get("status")
+            j["status_updated_at"] = m.get("status_updated_at")
+        jobs.sort(key=lambda x: x.get("score", 0), reverse=True)
+        return jsonify({"jobs": jobs})
+    except Exception as e:
+        return jsonify({"jobs": [], "error": str(e)}), 500
+
+# ============================================================================
 # HTML Dashboard Builder
 # ============================================================================
 
