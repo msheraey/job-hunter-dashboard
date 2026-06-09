@@ -22,6 +22,209 @@ def update_user_last_active(user_id):
     except:
         pass
 
+def get_analytics_data():
+    """Fetch all analytics data from existing tables"""
+    try:
+        total_jobs = supabase.table("job_pool").select("id", count="exact").execute().count or 0
+        new_jobs_24h = supabase.table("job_pool").select("id", count="exact").gt("created_at", (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()).execute().count or 0
+        active_users = supabase.table("users").select("id", count="exact").eq("is_active", True).execute().count or 0
+        total_users = supabase.table("users").select("id", count="exact").execute().count or 0
+        scrapes_today = supabase.table("title_pool").select("id", count="exact").gte("last_scraped", datetime.now(timezone.utc).date().isoformat()).execute().count or 0
+        daily_limit = 200
+        
+        match_data = supabase.table("user_job_matches").select("score").execute().data or []
+        avg_score = round(sum(m.get("score", 0) for m in match_data) / len(match_data)) if match_data else 0
+        total_matches = len(match_data)
+        high_matches = len([m for m in match_data if m.get("score", 0) >= 80])
+        
+        cv_uploaded = supabase.table("users").select("id", count="exact").not_.is_("cv_text", "null").execute().count or 0
+        cv_rate = round(cv_uploaded / total_users * 100) if total_users > 0 else 0
+        
+        last_scrape = supabase.table("scrape_logs").select("started_at,status").order("started_at", desc=True).limit(1).execute().data
+        last_scrape_status = last_scrape[0] if last_scrape else None
+        
+        # Jobs over time (last 30 days)
+        jobs_over_time = []
+        for i in range(29, -1, -1):
+            date = (datetime.now(timezone.utc) - timedelta(days=i)).date().isoformat()
+            count = supabase.table("job_pool").select("id", count="exact").gte("created_at", date).lt("created_at", (datetime.fromisoformat(date) + timedelta(days=1)).isoformat()).execute().count or 0
+            jobs_over_time.append({"date": date, "count": count})
+        
+        # Industry distribution
+        industries = supabase.table("job_pool").select("industry").execute().data or []
+        industry_counts = {}
+        for j in industries:
+            ind = j.get("industry") or "Unknown"
+            industry_counts[ind] = industry_counts.get(ind, 0) + 1
+        industry_distribution = [{"name": k, "count": v} for k, v in sorted(industry_counts.items(), key=lambda x: -x[1])[:10]]
+        
+        # Score distribution
+        score_ranges = {"0-20": 0, "21-40": 0, "41-60": 0, "61-80": 0, "81-100": 0}
+        for m in match_data:
+            score = m.get("score", 0)
+            if score <= 20: score_ranges["0-20"] += 1
+            elif score <= 40: score_ranges["21-40"] += 1
+            elif score <= 60: score_ranges["41-60"] += 1
+            elif score <= 80: score_ranges["61-80"] += 1
+            else: score_ranges["81-100"] += 1
+        
+        # Users over time
+        users_over_time = []
+        for i in range(29, -1, -1):
+            date = (datetime.now(timezone.utc) - timedelta(days=i)).date().isoformat()
+            count = supabase.table("users").select("id", count="exact").gte("created_at", date).lt("created_at", (datetime.fromisoformat(date) + timedelta(days=1)).isoformat()).execute().count or 0
+            users_over_time.append({"date": date, "count": count})
+        
+        # Gender distribution
+        genders = supabase.table("users").select("gender").execute().data or []
+        gender_counts = {"male": 0, "female": 0, "prefer_not_to_say": 0, "not_specified": 0}
+        for u in genders:
+            g = u.get("gender")
+            if g == "male": gender_counts["male"] += 1
+            elif g == "female": gender_counts["female"] += 1
+            elif g == "prefer_not_to_say": gender_counts["prefer_not_to_say"] += 1
+            else: gender_counts["not_specified"] += 1
+        
+        return {
+            "overview": {
+                "total_jobs": total_jobs,
+                "new_jobs_24h": new_jobs_24h,
+                "active_users": active_users,
+                "total_users": total_users,
+                "scrapes_today": scrapes_today,
+                "daily_limit": daily_limit,
+                "scrapes_remaining": daily_limit - scrapes_today,
+                "avg_match_score": avg_score,
+                "total_matches": total_matches,
+                "high_matches": high_matches,
+                "cv_upload_rate": cv_rate,
+                "last_scrape_status": last_scrape_status
+            },
+            "jobs_over_time": jobs_over_time,
+            "industry_distribution": industry_distribution,
+            "score_distribution": score_ranges,
+            "users_over_time": users_over_time,
+            "gender_distribution": gender_counts
+        }
+    except Exception as e:
+        print(f"Analytics error: {e}")
+        return {"error": str(e)}
+
+def get_system_health():
+    """Check status of all external services"""
+    import requests
+    health = {}
+    
+    # Supabase
+    try:
+        supabase.table("users").select("id").limit(1).execute()
+        health["supabase"] = {"status": "healthy", "message": "Connected", "icon": "🟢"}
+    except Exception as e:
+        health["supabase"] = {"status": "error", "message": str(e)[:50], "icon": "🔴"}
+    
+    # DataForSEO
+    try:
+        resp = requests.post(
+            "https://api.dataforseo.com/v3/serp/google/jobs/task_post",
+            auth=(os.environ.get("DATAFORSEO_LOGIN"), os.environ.get("DATAFORSEO_PASSWORD")),
+            json=[{"keyword": "test", "location_name": "United Arab Emirates"}],
+            timeout=10
+        )
+        if resp.status_code == 200:
+            health["dataforseo"] = {"status": "healthy", "message": "API ready", "icon": "🟢"}
+        elif resp.status_code == 402:
+            health["dataforseo"] = {"status": "warning", "message": "Check balance", "icon": "🟡"}
+        else:
+            health["dataforseo"] = {"status": "degraded", "message": f"HTTP {resp.status_code}", "icon": "🟡"}
+    except Exception as e:
+        health["dataforseo"] = {"status": "error", "message": str(e)[:50], "icon": "🔴"}
+    
+    # Gemini
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if gemini_key:
+        try:
+            resp = requests.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}", timeout=10)
+            if resp.status_code == 200:
+                health["gemini"] = {"status": "healthy", "message": "API ready", "icon": "🟢"}
+            else:
+                health["gemini"] = {"status": "error", "message": "Invalid key", "icon": "🔴"}
+        except:
+            health["gemini"] = {"status": "error", "message": "Connection failed", "icon": "🔴"}
+    else:
+        health["gemini"] = {"status": "missing", "message": "API key not set", "icon": "⚫"}
+    
+    # Resend
+    if os.environ.get("RESEND_API_KEY"):
+        health["resend"] = {"status": "healthy", "message": "Email ready", "icon": "🟢"}
+    else:
+        health["resend"] = {"status": "missing", "message": "API key not set", "icon": "⚫"}
+    
+    # Railway
+    try:
+        resp = requests.get("https://status.railway.app/api/status", timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            all_good = all(c.get("status") == "operational" for c in data.get("components", []))
+            health["railway"] = {"status": "healthy" if all_good else "degraded", "message": "Operational" if all_good else "Some issues", "icon": "🟢" if all_good else "🟡"}
+        else:
+            health["railway"] = {"status": "unknown", "message": "Status page unreachable", "icon": "⚫"}
+    except:
+        health["railway"] = {"status": "unknown", "message": "Cannot reach status page", "icon": "⚫"}
+    
+    # Lovable frontend
+    try:
+        resp = requests.get("https://jobhunter.ae", timeout=5)
+        if resp.status_code == 200:
+            health["lovable"] = {"status": "healthy", "message": "Frontend online", "icon": "🟢"}
+        else:
+            health["lovable"] = {"status": "degraded", "message": f"HTTP {resp.status_code}", "icon": "🟡"}
+    except:
+        health["lovable"] = {"status": "error", "message": "Cannot reach frontend", "icon": "🔴"}
+    
+    return health
+
+def get_credit_status():
+    """Get credit/balance info with dashboard links"""
+    credits = {
+        "dataforseo": {
+            "name": "DataForSEO",
+            "link": "https://app.dataforseo.com/billing/balance",
+            "message": "Check dashboard for balance",
+            "icon": "💰"
+        },
+        "gemini": {
+            "name": "Google Gemini",
+            "link": "https://console.cloud.google.com/apis/credentials",
+            "message": "Check Google Cloud Console",
+            "icon": "🤖"
+        },
+        "anthropic": {
+            "name": "Anthropic Claude",
+            "link": "https://console.anthropic.com/settings/billing",
+            "message": "Check dashboard for credits",
+            "icon": "🧠"
+        },
+        "resend": {
+            "name": "Resend Email",
+            "link": "https://resend.com/billing",
+            "message": "Check email credits",
+            "icon": "📧"
+        },
+        "supabase": {
+            "name": "Supabase",
+            "link": "https://supabase.com/dashboard/project/_/settings/billing",
+            "message": "Check usage",
+            "icon": "🗄️"
+        },
+        "railway": {
+            "name": "Railway",
+            "link": "https://railway.app/account/billing",
+            "message": "Check credits",
+            "icon": "🚂"
+        }
+    }
+    return credits
+
 # ============================================================================
 # API Routes
 # ============================================================================
@@ -33,6 +236,27 @@ def dashboard():
 @app.route('/health')
 def health():
     return jsonify({"status": "ok"})
+
+@app.route('/api/analytics')
+def api_analytics():
+    try:
+        return jsonify(get_analytics_data())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/system-health')
+def api_system_health():
+    try:
+        return jsonify(get_system_health())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/credit-status')
+def api_credit_status():
+    try:
+        return jsonify(get_credit_status())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/logs')
 def api_logs():
@@ -220,10 +444,8 @@ def api_delete_user():
 @app.route('/api/old-jobs')
 def api_old_jobs():
     try:
-        from scraper_v2 import get_old_jobs
         limit = request.args.get('limit', 100, type=int)
         offset = request.args.get('offset', 0, type=int)
-        
         result = supabase.table("old_jobs").select("*").order("moved_at", desc=True).limit(limit).offset(offset).execute()
         jobs = result.data or []
         return jsonify({"jobs": jobs, "total": len(jobs)})
@@ -236,20 +458,16 @@ def api_restore_job():
     job_id = data.get("job_id")
     if not job_id:
         return jsonify({"error": "job_id required"}), 400
-    
     try:
         old = supabase.table("old_jobs").select("*").eq("id", job_id).execute().data
         if not old:
-            return jsonify({"success": False, "message": "Job not found in old_jobs"})
-        
+            return jsonify({"success": False, "message": "Job not found"})
         job = old[0]
         job.pop("moved_at", None)
         job.pop("original_id", None)
         job.pop("age_days_at_move", None)
-        
         supabase.table("job_pool").insert(job).execute()
         supabase.table("old_jobs").delete().eq("id", job_id).execute()
-        
         return jsonify({"success": True, "message": "Job restored"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
@@ -277,7 +495,7 @@ def build_dashboard_html():
             for f in feedback:
                 f["email"] = email_map.get(f.get("user_id"), "anonymous")
         except Exception as e:
-            print(f"❌ Feedback load error: {e}")
+            print(f"Feedback load error: {e}")
             feedback = []
         today = datetime.now(timezone.utc).date().isoformat()
     except Exception as e:
@@ -375,23 +593,30 @@ def build_dashboard_html():
     scraped_today = len([t for t in titles if (t.get("last_scraped") or "")[:10] == today])
     
     page = f"""<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>JobHunter Admin</title>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>JobHunter Admin Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b}}
-.hdr{{background:linear-gradient(135deg,#1e40af,#3b82f6);color:white;padding:20px 32px;display:flex;justify-content:space-between;align-items:center}}
+.hdr{{background:linear-gradient(135deg,#1e40af,#3b82f6);color:white;padding:20px 32px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap}}
 .hdr h1{{font-size:22px;font-weight:700}}
 .wrap{{max-width:1400px;margin:0 auto;padding:24px 16px}}
-.stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;margin-bottom:24px}}
-.stat{{background:white;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
-.stat .v{{font-size:32px;font-weight:700;color:#1e40af}}
-.stat .l{{font-size:13px;color:#64748b;margin-top:4px}}
+.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin-bottom:24px}}
+.stat-card{{background:white;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.08);transition:transform 0.2s}}
+.stat-card:hover{{transform:translateY(-2px)}}
+.stat-card .value{{font-size:32px;font-weight:700;color:#1e40af}}
+.stat-card .label{{font-size:13px;color:#64748b;margin-top:4px}}
+.stat-card .trend{{font-size:11px;margin-top:8px;color:#22c55e}}
 .card{{background:white;border-radius:12px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:20px}}
 .tabs{{display:flex;gap:4px;margin-bottom:20px;border-bottom:2px solid #e2e8f0;flex-wrap:wrap}}
-.tab{{padding:10px 20px;cursor:pointer;font-size:14px;font-weight:500;color:#64748b;border-bottom:2px solid transparent;margin-bottom:-2px}}
+.tab{{padding:10px 20px;cursor:pointer;font-size:14px;font-weight:500;color:#64748b;border-bottom:2px solid transparent;margin-bottom:-2px;transition:all 0.2s}}
+.tab:hover{{color:#2563eb}}
 .tab.on{{color:#2563eb;border-bottom-color:#2563eb}}
-.pane{{display:none}}.pane.on{{display:block}}
+.pane{{display:none}}
+.pane.on{{display:block}}
 table{{width:100%;border-collapse:collapse}}
 th{{text-align:left;font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;padding:8px 12px;border-bottom:2px solid #f1f5f9}}
 td{{padding:10px 12px;border-bottom:1px solid #f8fafc;font-size:14px}}
@@ -401,120 +626,198 @@ tr:hover td{{background:#f8fafc}}
 @keyframes spin{{to{{transform:rotate(360deg)}}}}
 input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px}}
 #msg{{margin-top:16px;font-size:14px;color:#64748b}}
+.chart-container{{max-width:100%;margin-bottom:20px}}
+.chart-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(350px,1fr));gap:24px}}
+.health-item{{display:flex;justify-content:space-between;align-items:center;padding:12px;background:#f8fafc;border-radius:8px;margin-bottom:8px}}
+.credit-item{{display:flex;justify-content:space-between;align-items:center;padding:12px;background:#f8fafc;border-radius:8px;margin-bottom:8px}}
+.credit-link{{color:#2563eb;text-decoration:none;font-size:13px}}
+.credit-link:hover{{text-decoration:underline}}
+.status-dot{{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px}}
+.refresh-btn{{background:#f1f5f9;color:#64748b;padding:6px 12px;border:none;border-radius:8px;cursor:pointer;font-size:13px}}
+.refresh-btn:hover{{background:#e2e8f0}}
 </style></head>
 <body>
 <div class="hdr">
-  <div><h1>JobHunter Admin</h1><small style="opacity:.8;font-size:13px">Backend dashboard</small></div>
+  <div><h1>🎯 JobHunter Admin</h1><small style="opacity:.8;font-size:13px">Professional Dashboard</small></div>
   <div style="text-align:right;font-size:13px;opacity:.9">{len(jobs)} jobs · {len(titles)} titles · {len(users)} users</div>
 </div>
 <div class="wrap">
   <div class="tabs">
-    <div class="tab on" onclick="show('jobs',this)">Job Pool</div>
-    <div class="tab" onclick="show('titles',this)">Titles</div>
-    <div class="tab" onclick="show('users',this)">Users</div>
-    <div class="tab" onclick="show('scraper',this)">Run Scraper</div>
-    <div class="tab" onclick="show('logs',this)">Logs</div>
-    <div class="tab" onclick="show('feedback',this)">Feedback</div>
-    <div class="tab" onclick="show('oldjobs',this)">Old Jobs</div>
+    <div class="tab on" onclick="showTab('overview',this)">📊 Overview</div>
+    <div class="tab" onclick="showTab('jobs',this)">💼 Job Pool</div>
+    <div class="tab" onclick="showTab('titles',this)">🔍 Titles</div>
+    <div class="tab" onclick="showTab('users',this)">👥 Users</div>
+    <div class="tab" onclick="showTab('scraper',this)">⚙️ Run Scraper</div>
+    <div class="tab" onclick="showTab('logs',this)">📝 Logs</div>
+    <div class="tab" onclick="showTab('feedback',this)">💬 Feedback</div>
+    <div class="tab" onclick="showTab('oldjobs',this)">📦 Old Jobs</div>
+    <div class="tab" onclick="showTab('analytics',this)">📈 Analytics</div>
+    <div class="tab" onclick="showTab('health',this)">🩺 System Health</div>
+    <div class="tab" onclick="showTab('credits',this)">💰 Credits</div>
   </div>
   
-  <!-- Job Pool Tab -->
-  <div id="jobs" class="pane on card">
+  <!-- ==================== OVERVIEW TAB ==================== -->
+  <div id="overview" class="pane on">
+    <div class="stats-grid" id="overview-stats">Loading...</div>
+  </div>
+  
+  <!-- ==================== JOB POOL TAB ==================== -->
+  <div id="jobs" class="pane card">
     <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">
-      <input id="qs" placeholder="Search..." oninput="filter()" style="flex:1;min-width:200px">
-      <select id="qp" onchange="filter()"><option value="">All Platforms</option><option>LinkedIn</option><option>Indeed</option><option>Bayt.com</option><option>Naukrigulf</option><option>GulfTalent.com</option></select>
+      <input id="qs" placeholder="Search jobs..." oninput="filterJobs()" style="flex:1;min-width:200px">
+      <select id="qp" onchange="filterJobs()"><option value="">All Platforms</option><option>LinkedIn</option><option>Indeed</option><option>Bayt.com</option><option>Naukrigulf</option><option>GulfTalent.com</option></select>
     </div>
-    <table id="jt"><thead><tr><th>#</th><th>Title</th><th>Company</th><th>Location</th><th>Platform</th><th>Posted</th><th>Salary</th><th>Score</th><th></th></tr></thead>
-    <tbody>{jobs_html}</tbody></table>
+    <div style="overflow-x:auto">
+      <table id="jt"><thead><tr><th>#</th><th>Title</th><th>Company</th><th>Location</th><th>Platform</th><th>Posted</th><th>Salary</th><th>Score</th><th></th></tr></thead>
+      <tbody>{jobs_html}</tbody></table>
+    </div>
   </div>
   
-  <!-- Titles Tab -->
+  <!-- ==================== TITLES TAB ==================== -->
   <div id="titles" class="pane card">
-    <table><thead><tr><th>#</th><th>Keyword</th><th>Last Scraped</th><th>Requests</th><th>Status</th><th></th></tr></thead>
-    <tbody>{titles_html}</tbody></table>
+    <div style="overflow-x:auto">
+      <table><tr><thead><tr><th>#</th><th>Keyword</th><th>Last Scraped</th><th>Requests</th><th>Status</th><th></th></tr></thead>
+      <tbody>{titles_html}</tbody></table>
+    </div>
   </div>
   
-  <!-- Users Tab -->
+  <!-- ==================== USERS TAB ==================== -->
   <div id="users" class="pane card">
-    <table><thead><tr><th>#</th><th>Name</th><th>Email</th><th>Gender</th><th>CV</th><th>Joined</th><th>Last Active</th><th>Active</th><th></th></tr></thead>
-    <tbody>{users_html}</tbody></table>
+    <div style="overflow-x:auto">
+      <table><tr><thead><tr><th>#</th><th>Name</th><th>Email</th><th>Gender</th><th>CV</th><th>Joined</th><th>Last Active</th><th>Active</th><th></th></tr></thead>
+      <tbody>{users_html}</tbody></table>
+    </div>
   </div>
   
-  <!-- Scraper Tab -->
+  <!-- ==================== SCRAPER TAB ==================== -->
   <div id="scraper" class="pane card">
     <h2 style="margin-bottom:16px">Run Scraper</h2>
     <p style="color:#64748b;font-size:14px;margin-bottom:20px">Scrapes all active titles. Respects 24h cache. Daily ceiling: 200 scrapes.</p>
     <div style="display:flex;gap:12px;flex-wrap:wrap">
       <button id="sb" onclick="runScraper()" style="background:#2563eb;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">▶ Run Scraper Now</button>
-      <button id="eb" onclick="runEmail()" style="background:#059669;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">Score + Email Users</button>
+      <button id="eb" onclick="runEmail()" style="background:#059669;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">✉️ Score + Email Users</button>
     </div>
     <div id="msg"></div>
   </div>
   
-  <!-- Logs Tab -->
+  <!-- ==================== LOGS TAB ==================== -->
   <div id="logs" class="pane card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
       <h2 style="margin:0">Scrape Logs</h2>
-      <button onclick="loadLogs()" style="background:#f1f5f9;color:#64748b;padding:6px 12px;border:none;border-radius:8px;cursor:pointer;font-size:13px">Refresh</button>
+      <button onclick="loadLogs()" class="refresh-btn">🔄 Refresh</button>
     </div>
-    <table><thead><tr><th>#</th><th>Started</th><th>Finished</th><th>Status</th><th>Scraped</th><th>Saved</th><th></th></tr></thead>
-    <tbody id="lb">{logs_html}</tbody></table>
+    <div style="overflow-x:auto">
+      <table><tr><thead><tr><th>#</th><th>Started</th><th>Finished</th><th>Status</th><th>Scraped</th><th>Saved</th><th></th></tr></thead>
+      <tbody id="lb">{logs_html}</tbody></table>
+    </div>
     <div id="ld" style="display:none;margin-top:16px">
       <div style="display:flex;justify-content:space-between;margin-bottom:8px">
-        <strong>Log Detail</strong>
-        <button onclick="document.getElementById('ld').style.display='none'" style="background:#f1f5f9;border:none;padding:4px 10px;border-radius:6px;cursor:pointer">Close</button>
+        <strong>📄 Log Detail</strong>
+        <button onclick="document.getElementById('ld').style.display='none'" class="refresh-btn">Close</button>
       </div>
       <div id="lc" class="log-box">Loading...</div>
     </div>
   </div>
   
-  <!-- Feedback Tab -->
+  <!-- ==================== FEEDBACK TAB ==================== -->
   <div id="feedback" class="pane card">
     <h2 style="margin-bottom:16px">User Feedback</h2>
-    <table><thead><tr><th>#</th><th>Date</th><th>Rating</th><th>Comment</th><th>From</th></tr></thead>
-    <tbody>{feedback_html}</tbody></table>
+    <div style="overflow-x:auto">
+      <table><tr><thead><tr><th>#</th><th>Date</th><th>Rating</th><th>Comment</th><th>From</th></tr></thead>
+      <tbody>{feedback_html}</tbody></table>
+    </div>
   </div>
   
-  <!-- Old Jobs Tab -->
+  <!-- ==================== OLD JOBS TAB ==================== -->
   <div id="oldjobs" class="pane card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-      <h2 style="margin:0">Archived Jobs (&gt;30 days old)</h2>
-      <button onclick="loadOldJobs()" style="background:#f1f5f9;color:#64748b;padding:6px 12px;border:none;border-radius:8px;cursor:pointer;font-size:13px">Refresh</button>
+      <h2 style="margin:0">📦 Archived Jobs (&gt;30 days old)</h2>
+      <button onclick="loadOldJobs()" class="refresh-btn">🔄 Refresh</button>
     </div>
     <div style="margin-bottom:16px;padding:12px;background:#fef3c7;border-radius:8px;color:#92400e">
       ⚠️ Jobs older than 30 days are automatically moved here. They no longer appear in user matches but can be restored if needed.
     </div>
     <div style="overflow-x:auto">
       <table style="width:100%">
-        <thead>
-          <tr>
-            <th>Title</th>
-            <th>Company</th>
-            <th>Location</th>
-            <th>Age at move</th>
-            <th>Moved on</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody id="old-jobs-body">
-          <tr><td colspan="6" style="text-align:center">Loading...</td></tr>
-        </tbody>
+        <thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Age at move</th><th>Moved on</th><th>Action</th></tr></thead>
+        <tbody id="old-jobs-body"><tr><td colspan="6" style="text-align:center">Loading...</td></tr></tbody>
       </table>
     </div>
+  </div>
+  
+  <!-- ==================== ANALYTICS TAB ==================== -->
+  <div id="analytics" class="pane card">
+    <h2 style="margin-bottom:20px">📈 Analytics Dashboard</h2>
+    <div class="chart-grid">
+      <div class="chart-container"><canvas id="jobsChart"></canvas><p style="text-align:center;margin-top:8px;font-size:12px;color:#64748b">Jobs Over Time (30 days)</p></div>
+      <div class="chart-container"><canvas id="industryChart"></canvas><p style="text-align:center;margin-top:8px;font-size:12px;color:#64748b">Industry Distribution</p></div>
+      <div class="chart-container"><canvas id="scoreChart"></canvas><p style="text-align:center;margin-top:8px;font-size:12px;color:#64748b">Match Score Distribution</p></div>
+      <div class="chart-container"><canvas id="usersChart"></canvas><p style="text-align:center;margin-top:8px;font-size:12px;color:#64748b">User Growth (30 days)</p></div>
+      <div class="chart-container"><canvas id="genderChart"></canvas><p style="text-align:center;margin-top:8px;font-size:12px;color:#64748b">Gender Distribution</p></div>
+      <div class="chart-container"><canvas id="cvChart"></canvas><p style="text-align:center;margin-top:8px;font-size:12px;color:#64748b">CV Upload Rate</p></div>
+    </div>
+  </div>
+  
+  <!-- ==================== SYSTEM HEALTH TAB ==================== -->
+  <div id="health" class="pane card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <h2 style="margin:0">🩺 System Health</h2>
+      <button onclick="loadHealth()" class="refresh-btn">🔄 Check Now</button>
+    </div>
+    <div id="health-status">Loading...</div>
+  </div>
+  
+  <!-- ==================== CREDITS TAB ==================== -->
+  <div id="credits" class="pane card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <h2 style="margin:0">💰 Credit & Billing Links</h2>
+      <button onclick="loadCredits()" class="refresh-btn">🔄 Refresh</button>
+    </div>
+    <div id="credits-status">Loading...</div>
   </div>
 </div>
 
 <script>
-function show(id,el){{
+// ==================== TAB SWITCHING ====================
+function showTab(tabId, el) {{
   document.querySelectorAll('.pane').forEach(p => p.className = 'pane');
   document.querySelectorAll('.tab').forEach(t => t.className = 'tab');
-  document.getElementById(id).className = 'pane on';
+  document.getElementById(tabId).className = 'pane on';
   el.className = 'tab on';
-  if(id === 'logs') loadLogs();
-  if(id === 'oldjobs') loadOldJobs();
+  
+  if(tabId === 'logs') loadLogs();
+  if(tabId === 'oldjobs') loadOldJobs();
+  if(tabId === 'analytics') loadAnalytics();
+  if(tabId === 'health') loadHealth();
+  if(tabId === 'credits') loadCredits();
+  if(tabId === 'overview') loadOverview();
 }}
 
-function filter(){{
+// ==================== OVERVIEW ====================
+function loadOverview() {{
+  fetch('/api/analytics')
+    .then(r => r.json())
+    .then(d => {{
+      if(d.error) {{
+        document.getElementById('overview-stats').innerHTML = `<div class="stat-card"><div class="value">Error</div><div class="label">${{d.error}}</div></div>`;
+        return;
+      }}
+      var o = d.overview;
+      document.getElementById('overview-stats').innerHTML = `
+        <div class="stat-card"><div class="value">${{o.total_jobs}}</div><div class="label">Total Jobs</div></div>
+        <div class="stat-card"><div class="value">+${{o.new_jobs_24h}}</div><div class="label">New Jobs (24h)</div><div class="trend">↑ fresh</div></div>
+        <div class="stat-card"><div class="value">${{o.active_users}}/${{o.total_users}}</div><div class="label">Active / Total Users</div></div>
+        <div class="stat-card"><div class="value">${{o.scrapes_today}}/${{o.daily_limit}}</div><div class="label">Scrapes Today</div><div class="trend">${{o.scrapes_remaining}} remaining</div></div>
+        <div class="stat-card"><div class="value">${{o.avg_match_score}}%</div><div class="label">Avg Match Score</div><div class="trend">${{o.high_matches}} high matches</div></div>
+        <div class="stat-card"><div class="value">${{o.total_matches}}</div><div class="label">Total Matches</div></div>
+        <div class="stat-card"><div class="value">${{o.cv_upload_rate}}%</div><div class="label">CV Upload Rate</div></div>
+      `;
+    }})
+    .catch(e => document.getElementById('overview-stats').innerHTML = `<div class="stat-card"><div class="value">Error</div><div class="label">${{e}}</div></div>`);
+}}
+
+// ==================== JOB FILTER ====================
+function filterJobs() {{
   var q = document.getElementById('qs').value.toLowerCase();
   var p = document.getElementById('qp').value.toLowerCase();
   document.querySelectorAll('#jt tbody tr').forEach(r => {{
@@ -523,147 +826,161 @@ function filter(){{
   }});
 }}
 
-function setMsg(h){{
+// ==================== SCRAPER FUNCTIONS ====================
+function setMsg(h) {{
   var e = document.getElementById('msg');
   e.style.display = 'block';
   e.innerHTML = h;
+  setTimeout(() => {{ e.style.display = 'none'; }}, 10000);
 }}
 
-function runScraper(){{
+function runScraper() {{
   var b = document.getElementById('sb');
   b.disabled = true;
   b.innerHTML = '<span class="sp"></span>Starting...';
-  setMsg('Scraper running in background...');
+  setMsg('🔄 Scraper running in background...');
   fetch('/api/run-scraper',{{method:'POST'}})
     .then(r => r.json())
-    .then(() => {{
-      b.disabled = false;
-      b.innerHTML = '▶ Run Scraper Now';
-      setMsg('Started! Check Logs tab in 30 seconds.');
-    }})
-    .catch(e => {{
-      b.disabled = false;
-      b.innerHTML = '▶ Run Scraper Now';
-      setMsg('Error: ' + e);
-    }});
+    .then(() => {{ b.disabled = false; b.innerHTML = '▶ Run Scraper Now'; setMsg('✅ Started! Check Logs tab in 30 seconds.'); }})
+    .catch(e => {{ b.disabled = false; b.innerHTML = '▶ Run Scraper Now'; setMsg('❌ Error: ' + e); }});
 }}
 
-function runEmail(){{
+function runEmail() {{
   var b = document.getElementById('eb');
   b.disabled = true;
   b.innerHTML = '<span class="sp"></span>Processing...';
-  setMsg('Scoring and emailing...');
+  setMsg('📧 Scoring and emailing...');
   fetch('/api/score-and-email',{{method:'POST'}})
     .then(r => r.json())
-    .then(d => {{
-      b.disabled = false;
-      b.innerHTML = 'Score + Email Users';
-      var h = '';
-      for(var i=0;i<d.log.length;i++) h += '<div>' + d.log[i] + '</div>';
-      setMsg(h);
-    }})
-    .catch(e => {{
-      b.disabled = false;
-      b.innerHTML = 'Score + Email Users';
-      setMsg('Error: ' + e);
-    }});
+    .then(d => {{ b.disabled = false; b.innerHTML = '✉️ Score + Email Users'; var h = ''; for(var i=0;i<d.log.length;i++) h += '<div>' + d.log[i] + '</div>'; setMsg(h); }})
+    .catch(e => {{ b.disabled = false; b.innerHTML = '✉️ Score + Email Users'; setMsg('❌ Error: ' + e); }});
 }}
 
-function loadLogs(){{
+// ==================== LOGS ====================
+function loadLogs() {{
   fetch('/api/logs').then(r => r.json()).then(d => {{
     var b = document.getElementById('lb');
-    if(!d.logs||!d.logs.length){{
-      b.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">No logs yet</td></tr>';
-      return;
-    }}
+    if(!d.logs||!d.logs.length){{ b.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">No logs yet</td></tr>'; return; }}
     var h = '';
     for(var i=0;i<d.logs.length;i++){{
-      var l = d.logs[i];
-      var s = l.status||'';
-      var bg = s==='success'?'#dcfce7;color:#166534':s==='error'?'#fee2e2;color:#991b1b':'#dbeafe;color:#1d4ed8';
+      var l = d.logs[i], s = l.status||'', bg = s==='success'?'#dcfce7;color:#166534':s==='error'?'#fee2e2;color:#991b1b':'#dbeafe;color:#1d4ed8';
       h += `<tr><td>${{i+1}}</td><td>${{(l.started_at||'').slice(0,16).replace('T',' ')}}</td><td>${{(l.finished_at||'').slice(0,16).replace('T',' ')}}</td>`;
       h += `<td><span style="background:${{bg}};padding:2px 8px;border-radius:20px;font-size:12px">${{s}}</span></td>`;
       h += `<td>${{l.total_scraped||0}}</td><td>${{l.total_saved||0}}</td>`;
-      h += `<td><button class="vlog" data-id="${{l.id}}" style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">View</button></td></tr>`;
+      h += `<td><button class="vlog" data-id="${{l.id}}" style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer">View</button></td></tr>`;
     }}
     b.innerHTML = h;
-    document.querySelectorAll('.vlog').forEach(btn => {{
-      btn.addEventListener('click', function(){{ showLog(this.getAttribute('data-id')); }});
-    }});
+    document.querySelectorAll('.vlog').forEach(btn => btn.addEventListener('click', function(){{ showLog(this.getAttribute('data-id')); }}));
   }});
 }}
 
-function showLog(id){{
-  var d = document.getElementById('ld');
-  var c = document.getElementById('lc');
-  d.style.display = 'block';
-  c.textContent = 'Loading...';
-  d.scrollIntoView({{behavior:'smooth'}});
+function showLog(id) {{
+  var d = document.getElementById('ld'), c = document.getElementById('lc');
+  d.style.display = 'block'; c.textContent = 'Loading...'; d.scrollIntoView({{behavior:'smooth'}});
   fetch('/api/logs/'+id).then(r => r.json()).then(d => {{ c.textContent = d.log_text||'No content yet'; c.scrollTop = c.scrollHeight; }});
 }}
 
-function delTitle(id){{
-  if(!confirm('Delete this title from the pool? This cannot be undone.')) return;
-  fetch('/api/delete-title',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{id:id}})}})
-    .then(r => r.json())
-    .then(d => {{ if(d.ok){{ location.reload(); }}else{{ alert('Error: '+(d.error||'failed')); }} }})
-    .catch(e => {{ alert('Error: '+e); }});
-}}
-
-function delUser(id){{
-  if(!confirm('Delete this user and all their matches/titles links? This cannot be undone.')) return;
-  fetch('/api/delete-user',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{id:id}})}})
-    .then(r => r.json())
-    .then(d => {{ if(d.ok){{ location.reload(); }}else{{ alert('Error: '+(d.error||'failed')); }} }})
-    .catch(e => {{ alert('Error: '+e); }});
-}}
-
-function loadOldJobs(){{
+// ==================== OLD JOBS ====================
+function loadOldJobs() {{
   fetch('/api/old-jobs?limit=100')
     .then(r => r.json())
     .then(data => {{
-      if(data.error){{
-        document.getElementById('old-jobs-body').innerHTML = `<tr><td colspan="6" style="text-align:center;color:red">Error: ${{data.error}}</td></tr>`;
-        return;
-      }}
-      if(!data.jobs || data.jobs.length === 0){{
-        document.getElementById('old-jobs-body').innerHTML = `<tr><td colspan="6" style="text-align:center">No archived jobs yet</td></tr>`;
-        return;
-      }}
+      if(data.error){{ document.getElementById('old-jobs-body').innerHTML = `<tr><td colspan="6" style="text-align:center;color:red">Error: ${{data.error}}</td></tr>`; return; }}
+      if(!data.jobs || data.jobs.length === 0){{ document.getElementById('old-jobs-body').innerHTML = '<tr><td colspan="6" style="text-align:center">No archived jobs yet</td></tr>'; return; }}
       var html = '';
       for(var i=0;i<data.jobs.length;i++){{
         var j = data.jobs[i];
-        html += `<tr>
-          <td>${{j.title || 'N/A'}}</td>
-          <td>${{j.company || 'N/A'}}</td>
-          <td>${{j.location || 'UAE'}}</td>
-          <td>${{j.age_days_at_move || '?'}} days</td>
-          <td>${{(j.moved_at || '').slice(0,10)}}</td>
-          <td><button onclick="restoreJob('${{j.id}}')" style="background:#10b981;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer">Restore</button></td>
-        </tr>`;
+        html += `<tr><td>${{j.title || 'N/A'}}</td><td>${{j.company || 'N/A'}}</td><td>${{j.location || 'UAE'}}</td><td>${{j.age_days_at_move || '?'}} days</td><td>${{(j.moved_at || '').slice(0,10)}}</td><td><button onclick="restoreJob('${{j.id}}')" style="background:#10b981;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer">Restore</button></td></tr>`;
       }}
       document.getElementById('old-jobs-body').innerHTML = html;
-    }})
-    .catch(e => {{
-      document.getElementById('old-jobs-body').innerHTML = `<tr><td colspan="6" style="text-align:center;color:red">Error: ${{e}}</td></tr>`;
     }});
 }}
 
-function restoreJob(jobId){{
-  if(!confirm('Restore this job to active pool? It will reappear in user matches.')) return;
+function restoreJob(jobId) {{
+  if(!confirm('Restore this job to active pool?')) return;
   fetch('/api/restore-job',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{job_id:jobId}})}})
     .then(r => r.json())
-    .then(data => {{
-      if(data.success){{
-        alert('Job restored successfully');
-        loadOldJobs();
-      }}else{{
-        alert('Error: ' + data.message);
-      }}
-    }})
-    .catch(e => alert('Error: ' + e));
+    .then(data => {{ if(data.success){{ alert('Restored!'); loadOldJobs(); }}else{{ alert('Error: '+data.message); }} }});
 }}
+
+// ==================== ANALYTICS ====================
+let jobsChart, industryChart, scoreChart, usersChart, genderChart, cvChart;
+
+function loadAnalytics() {{
+  fetch('/api/analytics')
+    .then(r => r.json())
+    .then(d => {{
+      if(d.error) return;
+      
+      if(jobsChart) jobsChart.destroy();
+      jobsChart = new Chart(document.getElementById('jobsChart'), {{ type: 'line', data: {{ labels: d.jobs_over_time.map(x => x.date), datasets: [{{ label: 'Jobs Added', data: d.jobs_over_time.map(x => x.count), borderColor: '#2563eb', fill: false }}] }}, options: {{ responsive: true }} }});
+      
+      if(industryChart) industryChart.destroy();
+      industryChart = new Chart(document.getElementById('industryChart'), {{ type: 'pie', data: {{ labels: d.industry_distribution.map(x => x.name), datasets: [{{ data: d.industry_distribution.map(x => x.count), backgroundColor: ['#2563eb','#dc2626','#f59e0b','#10b981','#8b5cf6','#ec489a','#06b6d4','#84cc16','#f97316','#6366f1'] }}] }}, options: {{ responsive: true }} }});
+      
+      if(scoreChart) scoreChart.destroy();
+      scoreChart = new Chart(document.getElementById('scoreChart'), {{ type: 'bar', data: {{ labels: Object.keys(d.score_distribution), datasets: [{{ label: 'Matches', data: Object.values(d.score_distribution), backgroundColor: '#f59e0b' }}] }}, options: {{ responsive: true }} }});
+      
+      if(usersChart) usersChart.destroy();
+      usersChart = new Chart(document.getElementById('usersChart'), {{ type: 'line', data: {{ labels: d.users_over_time.map(x => x.date), datasets: [{{ label: 'Users Added', data: d.users_over_time.map(x => x.count), borderColor: '#10b981', fill: false }}] }}, options: {{ responsive: true }} }});
+      
+      if(genderChart) genderChart.destroy();
+      genderChart = new Chart(document.getElementById('genderChart'), {{ type: 'pie', data: {{ labels: ['Male','Female','Prefer not','Not specified'], datasets: [{{ data: [d.gender_distribution.male, d.gender_distribution.female, d.gender_distribution.prefer_not_to_say, d.gender_distribution.not_specified], backgroundColor: ['#3b82f6','#ec489a','#94a3b8','#cbd5e1'] }}] }}, options: {{ responsive: true }} }});
+      
+      if(cvChart) cvChart.destroy();
+      cvChart = new Chart(document.getElementById('cvChart'), {{ type: 'doughnut', data: {{ labels: ['CV Uploaded','No CV'], datasets: [{{ data: [d.overview.cv_upload_rate, 100 - d.overview.cv_upload_rate], backgroundColor: ['#10b981','#e2e8f0'] }}] }}, options: {{ responsive: true }} }});
+    }});
+}}
+
+// ==================== SYSTEM HEALTH ====================
+function loadHealth() {{
+  fetch('/api/system-health')
+    .then(r => r.json())
+    .then(h => {{
+      var html = '';
+      for(var service in h) {{
+        html += `<div class="health-item"><div><span class="status-dot ${{h[service].status === 'healthy' ? 'green' : (h[service].status === 'warning' ? 'yellow' : 'red')}}"></span><strong>${{service.toUpperCase()}}</strong></div><div><span style="color:${{h[service].status === 'healthy' ? '#22c55e' : (h[service].status === 'warning' ? '#f59e0b' : '#dc2626')}}">${{h[service].icon}} ${{h[service].message}}</span></div></div>`;
+      }}
+      document.getElementById('health-status').innerHTML = html;
+    }});
+}}
+
+// ==================== CREDITS ====================
+function loadCredits() {{
+  fetch('/api/credit-status')
+    .then(r => r.json())
+    .then(c => {{
+      var html = '';
+      for(var service in c) {{
+        html += `<div class="credit-item"><div><strong>${{c[service].icon}} ${{c[service].name}}</strong></div><div><a href="${{c[service].link}}" target="_blank" class="credit-link">Check Balance →</a><span style="margin-left:12px;font-size:12px;color:#64748b">${{c[service].message}}</span></div></div>`;
+      }}
+      document.getElementById('credits-status').innerHTML = html;
+    }});
+}}
+
+// ==================== DELETE FUNCTIONS ====================
+function delTitle(id) {{
+  if(!confirm('Delete this title? Cannot be undone.')) return;
+  fetch('/api/delete-title',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{id:id}})}})
+    .then(r => r.json())
+    .then(d => {{ if(d.ok){{ location.reload(); }}else{{ alert('Error: '+d.error); }} }});
+}}
+
+function delUser(id) {{
+  if(!confirm('Delete this user? Cannot be undone.')) return;
+  fetch('/api/delete-user',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{id:id}})}})
+    .then(r => r.json())
+    .then(d => {{ if(d.ok){{ location.reload(); }}else{{ alert('Error: '+d.error); }} }});
+}}
+
+// Load initial data
+loadOverview();
 </script>
+<style>
+.green{{background:#22c55e; box-shadow:0 0 0 2px #f8fafc,0 0 0 4px #22c55e20;}}
+.yellow{{background:#f59e0b; box-shadow:0 0 0 2px #f8fafc,0 0 0 4px #f59e0b20;}}
+.red{{background:#dc2626; box-shadow:0 0 0 2px #f8fafc,0 0 0 4px #dc262620;}}
+</style>
 </body></html>"""
     
     return page
