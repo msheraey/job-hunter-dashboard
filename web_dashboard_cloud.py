@@ -7,7 +7,35 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+
+# Fix CORS - Allow frontend domain
+CORS(app, 
+     origins=[
+         "https://jobhunter.ae",
+         "https://www.jobhunter.ae", 
+         "https://jobhunter.ae/dashboard",
+         "http://localhost:3000",
+         "http://localhost:5173",
+         "http://localhost:8080"
+     ],
+     supports_credentials=True,
+     allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+
+# Handle preflight requests manually for all routes
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', 'https://jobhunter.ae')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    return response
+
+# Handle OPTIONS preflight requests
+@app.route('/', defaults={'path': ''}, methods=['OPTIONS'])
+@app.route('/<path:path>', methods=['OPTIONS'])
+def options_handler(path):
+    return jsonify({'status': 'ok'}), 200
 
 from supabase import create_client
 supabase = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY"))
@@ -322,8 +350,11 @@ def api_generate_cv():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/refresh-matches', methods=['POST'])
+@app.route('/api/refresh-matches', methods=['POST', 'OPTIONS'])
 def api_refresh_matches():
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
+    
     from scraper_v2 import refresh_matches_for_user
     data = request.json or {}
     user_id = data.get("user_id")
@@ -342,8 +373,11 @@ def api_refresh_matches():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/add-title', methods=['POST'])
+@app.route('/api/add-title', methods=['POST', 'OPTIONS'])
 def api_add_title():
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
+    
     from scraper_v2 import validate_title, normalize_title, search_jobs
     data = request.json or {}
     user_id = data.get("user_id")
@@ -390,8 +424,11 @@ def api_add_title():
     threading.Thread(target=bg, daemon=True).start()
     return jsonify({"success": True, "title_id": title_record["id"]})
 
-@app.route('/api/can-edit-titles', methods=['POST'])
+@app.route('/api/can-edit-titles', methods=['POST', 'OPTIONS'])
 def api_can_edit_titles():
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
+    
     data = request.json or {}
     user_id = data.get("user_id")
     if not user_id:
@@ -410,8 +447,11 @@ def api_can_edit_titles():
     except Exception as e:
         return jsonify({"can_edit": True, "days_left": 0})
 
-@app.route('/api/delete-title', methods=['POST'])
+@app.route('/api/delete-title', methods=['POST', 'OPTIONS'])
 def api_delete_title():
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
+    
     data = request.json or {}
     tid = data.get("id")
     if not tid:
@@ -423,8 +463,11 @@ def api_delete_title():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-@app.route('/api/delete-user', methods=['POST'])
+@app.route('/api/delete-user', methods=['POST', 'OPTIONS'])
 def api_delete_user():
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
+    
     data = request.json or {}
     uid = data.get("id")
     if not uid:
@@ -452,8 +495,11 @@ def api_old_jobs():
     except Exception as e:
         return jsonify({"error": str(e), "jobs": []})
 
-@app.route('/api/restore-job', methods=['POST'])
+@app.route('/api/restore-job', methods=['POST', 'OPTIONS'])
 def api_restore_job():
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
+    
     data = request.json or {}
     job_id = data.get("job_id")
     if not job_id:
@@ -524,7 +570,7 @@ def build_dashboard_html():
             <td>{j.get("salary") or "&mdash;"}</td>
             <td>{score_html}</td>
             <td><a href="{link}" target="_blank" style="background:#2563eb;color:white;padding:4px 10px;border-radius:6px;text-decoration:none;font-size:12px">View</a></td>
-        </tr>""")
+        <tr>""")
     jobs_html = "".join(rows) or '<tr><td colspan="9" style="text-align:center;padding:32px;color:#94a3b8">No jobs yet</td></tr>'
     
     # Build titles rows
@@ -541,7 +587,7 @@ def build_dashboard_html():
         tid = json.dumps(t.get("id"))
         del_btn = f'<button onclick=\'delTitle({tid})\' style="background:#dc2626;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">Delete</button>'
         rows.append(f"<tr><td>{i}</td><td>{t.get('keyword') or ''}</td><td>{ls or 'Never'}</td><td>{t.get('request_count') or 0}</td><td>{status}</td><td>{del_btn}</td></tr>")
-    titles_html = "".join(rows) or '<tr><td colspan="6" style="text-align:center;padding:32px;color:#94a3b8">No titles yet</td></tr>'
+    titles_html = "".join(rows) or '<table><td colspan="6" style="text-align:center;padding:32px;color:#94a3b8">No titles yet</td></tr>'
     
     # Build users rows
     rows = []
@@ -635,6 +681,9 @@ input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-s
 .status-dot{{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px}}
 .refresh-btn{{background:#f1f5f9;color:#64748b;padding:6px 12px;border:none;border-radius:8px;cursor:pointer;font-size:13px}}
 .refresh-btn:hover{{background:#e2e8f0}}
+.green{{background:#22c55e;}}
+.yellow{{background:#f59e0b;}}
+.red{{background:#dc2626;}}
 </style></head>
 <body>
 <div class="hdr">
@@ -656,12 +705,12 @@ input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-s
     <div class="tab" onclick="showTab('credits',this)">💰 Credits</div>
   </div>
   
-  <!-- ==================== OVERVIEW TAB ==================== -->
+  <!-- OVERVIEW TAB -->
   <div id="overview" class="pane on">
     <div class="stats-grid" id="overview-stats">Loading...</div>
   </div>
   
-  <!-- ==================== JOB POOL TAB ==================== -->
+  <!-- JOB POOL TAB -->
   <div id="jobs" class="pane card">
     <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">
       <input id="qs" placeholder="Search jobs..." oninput="filterJobs()" style="flex:1;min-width:200px">
@@ -673,15 +722,15 @@ input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-s
     </div>
   </div>
   
-  <!-- ==================== TITLES TAB ==================== -->
+  <!-- TITLES TAB -->
   <div id="titles" class="pane card">
     <div style="overflow-x:auto">
-      <table><tr><thead><tr><th>#</th><th>Keyword</th><th>Last Scraped</th><th>Requests</th><th>Status</th><th></th></tr></thead>
+      <table><td><thead><tr><th>#</th><th>Keyword</th><th>Last Scraped</th><th>Requests</th><th>Status</th><th></th></tr></thead>
       <tbody>{titles_html}</tbody></table>
     </div>
   </div>
   
-  <!-- ==================== USERS TAB ==================== -->
+  <!-- USERS TAB -->
   <div id="users" class="pane card">
     <div style="overflow-x:auto">
       <table><tr><thead><tr><th>#</th><th>Name</th><th>Email</th><th>Gender</th><th>CV</th><th>Joined</th><th>Last Active</th><th>Active</th><th></th></tr></thead>
@@ -689,7 +738,7 @@ input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-s
     </div>
   </div>
   
-  <!-- ==================== SCRAPER TAB ==================== -->
+  <!-- SCRAPER TAB -->
   <div id="scraper" class="pane card">
     <h2 style="margin-bottom:16px">Run Scraper</h2>
     <p style="color:#64748b;font-size:14px;margin-bottom:20px">Scrapes all active titles. Respects 24h cache. Daily ceiling: 200 scrapes.</p>
@@ -700,14 +749,14 @@ input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-s
     <div id="msg"></div>
   </div>
   
-  <!-- ==================== LOGS TAB ==================== -->
+  <!-- LOGS TAB -->
   <div id="logs" class="pane card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
       <h2 style="margin:0">Scrape Logs</h2>
       <button onclick="loadLogs()" class="refresh-btn">🔄 Refresh</button>
     </div>
     <div style="overflow-x:auto">
-      <table><tr><thead><tr><th>#</th><th>Started</th><th>Finished</th><th>Status</th><th>Scraped</th><th>Saved</th><th></th></tr></thead>
+      <table><thead><tr><th>#</th><th>Started</th><th>Finished</th><th>Status</th><th>Scraped</th><th>Saved</th><th></th></tr></thead>
       <tbody id="lb">{logs_html}</tbody></table>
     </div>
     <div id="ld" style="display:none;margin-top:16px">
@@ -719,16 +768,16 @@ input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-s
     </div>
   </div>
   
-  <!-- ==================== FEEDBACK TAB ==================== -->
+  <!-- FEEDBACK TAB -->
   <div id="feedback" class="pane card">
     <h2 style="margin-bottom:16px">User Feedback</h2>
     <div style="overflow-x:auto">
-      <table><tr><thead><tr><th>#</th><th>Date</th><th>Rating</th><th>Comment</th><th>From</th></tr></thead>
+      <table><thead><tr><th>#</th><th>Date</th><th>Rating</th><th>Comment</th><th>From</th></tr></thead>
       <tbody>{feedback_html}</tbody></table>
     </div>
   </div>
   
-  <!-- ==================== OLD JOBS TAB ==================== -->
+  <!-- OLD JOBS TAB -->
   <div id="oldjobs" class="pane card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
       <h2 style="margin:0">📦 Archived Jobs (&gt;30 days old)</h2>
@@ -745,7 +794,7 @@ input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-s
     </div>
   </div>
   
-  <!-- ==================== ANALYTICS TAB ==================== -->
+  <!-- ANALYTICS TAB -->
   <div id="analytics" class="pane card">
     <h2 style="margin-bottom:20px">📈 Analytics Dashboard</h2>
     <div class="chart-grid">
@@ -758,7 +807,7 @@ input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-s
     </div>
   </div>
   
-  <!-- ==================== SYSTEM HEALTH TAB ==================== -->
+  <!-- SYSTEM HEALTH TAB -->
   <div id="health" class="pane card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
       <h2 style="margin:0">🩺 System Health</h2>
@@ -767,7 +816,7 @@ input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-s
     <div id="health-status">Loading...</div>
   </div>
   
-  <!-- ==================== CREDITS TAB ==================== -->
+  <!-- CREDITS TAB -->
   <div id="credits" class="pane card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
       <h2 style="margin:0">💰 Credit & Billing Links</h2>
@@ -939,7 +988,8 @@ function loadHealth() {{
     .then(h => {{
       var html = '';
       for(var service in h) {{
-        html += `<div class="health-item"><div><span class="status-dot ${{h[service].status === 'healthy' ? 'green' : (h[service].status === 'warning' ? 'yellow' : 'red')}}"></span><strong>${{service.toUpperCase()}}</strong></div><div><span style="color:${{h[service].status === 'healthy' ? '#22c55e' : (h[service].status === 'warning' ? '#f59e0b' : '#dc2626')}}">${{h[service].icon}} ${{h[service].message}}</span></div></div>`;
+        var dotClass = h[service].status === 'healthy' ? 'green' : (h[service].status === 'warning' ? 'yellow' : 'red');
+        html += `<div class="health-item"><div><span class="status-dot ${{dotClass}}"></span><strong>${{service.toUpperCase()}}</strong></div><div><span style="color:${{h[service].status === 'healthy' ? '#22c55e' : (h[service].status === 'warning' ? '#f59e0b' : '#dc2626')}}">${{h[service].icon}} ${{h[service].message}}</span></div></div>`;
       }}
       document.getElementById('health-status').innerHTML = html;
     }});
@@ -976,11 +1026,6 @@ function delUser(id) {{
 // Load initial data
 loadOverview();
 </script>
-<style>
-.green{{background:#22c55e; box-shadow:0 0 0 2px #f8fafc,0 0 0 4px #22c55e20;}}
-.yellow{{background:#f59e0b; box-shadow:0 0 0 2px #f8fafc,0 0 0 4px #f59e0b20;}}
-.red{{background:#dc2626; box-shadow:0 0 0 2px #f8fafc,0 0 0 4px #dc262620;}}
-</style>
 </body></html>"""
     
     return page
