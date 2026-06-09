@@ -2,10 +2,11 @@
 """
 JobHunter Daily Cron Job
 Runs once per day via Railway cron service.
-1. Scrapes all titles in the pool
-2. Scores new jobs for every active user
-3. Sends daily email digest to each user with 60%+ matches
-4. Exits cleanly
+1. Archives old jobs (>30 days)
+2. Scrapes all titles in the pool
+3. Scores new jobs for every active user
+4. Sends daily email digest to each user with 60%+ matches
+5. Exits cleanly
 
 Railway cron schedule: 0 5 * * * (5:00 AM UTC = 9:00 AM Dubai)
 """
@@ -14,12 +15,12 @@ import os
 import sys
 from datetime import datetime, timezone
 
-# Import everything from the scraper
 from scraper_v2 import (
     supabase,
     run_full_scrape,
     search_and_score_for_user,
     generate_cv_cover_letter,
+    move_old_jobs_to_archive,
     RunLogger
 )
 
@@ -39,16 +40,24 @@ def run_daily_job():
     logger = RunLogger("daily_job")
     logger.add("🚀 Daily job started")
 
-    # ── Step 1: Scrape all titles ──────────────────────────────────
-    logger.add("\n📡 STEP 1: Scraping all titles in pool...")
+    # ── Step 1: Archive old jobs ──────────────────────────────────────
+    logger.add("\n📦 STEP 1: Archiving jobs older than 30 days...")
+    try:
+        moved = move_old_jobs_to_archive(logger)
+        logger.add(f"✅ Archived {moved} jobs")
+    except Exception as e:
+        logger.add(f"⚠️ Archive error (continuing): {e}")
+
+    # ── Step 2: Scrape all titles ──────────────────────────────────────
+    logger.add("\n📡 STEP 2: Scraping all titles in pool...")
     try:
         run_full_scrape()
         logger.add("✅ Full scrape complete")
     except Exception as e:
         logger.add(f"⚠️ Scrape error (continuing): {e}")
 
-    # ── Step 2: Get all active users ───────────────────────────────
-    logger.add("\n👥 STEP 2: Loading active users...")
+    # ── Step 3: Get all active users ───────────────────────────────────
+    logger.add("\n👥 STEP 3: Loading active users...")
     try:
         users = supabase.table("users").select("*").eq("is_active", True).execute().data or []
         logger.add(f"✅ Found {len(users)} active users")
@@ -62,8 +71,8 @@ def run_daily_job():
         logger.finish(success=True)
         return
 
-    # ── Step 3: Score + email each user ───────────────────────────
-    logger.add(f"\n🤖 STEP 3: Scoring and emailing {len(users)} users...")
+    # ── Step 4: Score + email each user ─────────────────────────────────
+    logger.add(f"\n🤖 STEP 4: Scoring and emailing {len(users)} users...")
     total_emails = 0
     total_matches = 0
 
@@ -111,7 +120,7 @@ def run_daily_job():
             logger.add(f"  ❌ Error processing {user_email}: {e}")
             continue
 
-    # ── Step 4: Summary ────────────────────────────────────────────
+    # ── Step 5: Summary ─────────────────────────────────────────────────
     logger.add(f"\n{'='*60}")
     logger.add(f"✅ Daily job complete")
     logger.add(f"   Users processed: {len(users)}")
