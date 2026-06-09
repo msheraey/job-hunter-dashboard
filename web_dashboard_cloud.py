@@ -108,59 +108,8 @@ def get_analytics_data():
         "gender_distribution": gender_counts
     }
 
-def get_system_health():
-    """Check status of external services"""
-    health = {}
-    
-    # Supabase
-    try:
-        supabase.table("users").select("id").limit(1).execute()
-        health["supabase"] = {"status": "healthy", "error": None}
-    except Exception as e:
-        health["supabase"] = {"status": "error", "error": str(e)}
-    
-    # DataForSEO
-    try:
-        import requests
-        resp = requests.post(
-            "https://api.dataforseo.com/v3/serp/google/jobs/task_post",
-            auth=(os.environ.get("DATAFORSEO_LOGIN"), os.environ.get("DATAFORSEO_PASSWORD")),
-            json=[{"keyword": "test", "location_name": "United Arab Emirates"}],
-            timeout=10
-        )
-        if resp.status_code == 200:
-            health["dataforseo"] = {"status": "healthy", "error": None}
-        else:
-            health["dataforseo"] = {"status": "degraded", "error": f"HTTP {resp.status_code}"}
-    except Exception as e:
-        health["dataforseo"] = {"status": "error", "error": str(e)}
-    
-    # Gemini
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    if gemini_key:
-        try:
-            import requests
-            resp = requests.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}", timeout=10)
-            if resp.status_code == 200:
-                health["gemini"] = {"status": "healthy", "error": None}
-            else:
-                health["gemini"] = {"status": "degraded", "error": f"HTTP {resp.status_code}"}
-        except Exception as e:
-            health["gemini"] = {"status": "error", "error": str(e)}
-    else:
-        health["gemini"] = {"status": "missing", "error": "GEMINI_API_KEY not set"}
-    
-    # Resend (email)
-    resend_key = os.environ.get("RESEND_API_KEY")
-    if resend_key:
-        health["resend"] = {"status": "configured", "error": None}
-    else:
-        health["resend"] = {"status": "missing", "error": "RESEND_API_KEY not set"}
-    
-    return health
-
 # ============================================================================
-# Routes
+# API Routes
 # ============================================================================
 
 @app.route('/')
@@ -178,12 +127,299 @@ def api_analytics():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/system-health')
-def api_system_health():
+@app.route('/api/credit-status')
+def api_credit_status():
+    """Returns credit/balance info and dashboard links for all services"""
+    
+    credits = {
+        "dataforseo": {
+            "name": "DataForSEO",
+            "has_api": False,
+            "link": "https://app.dataforseo.com/billing/balance",
+            "message": "Check dashboard for balance",
+            "status": "unknown",
+            "icon": "💰"
+        },
+        "gemini": {
+            "name": "Google Gemini",
+            "has_api": False,
+            "link": "https://console.cloud.google.com/apis/credentials",
+            "message": "Check Google Cloud Console → Billing",
+            "status": "unknown",
+            "icon": "🤖"
+        },
+        "anthropic": {
+            "name": "Anthropic (Claude)",
+            "has_api": False,
+            "link": "https://console.anthropic.com/settings/billing",
+            "message": "Check dashboard for credits",
+            "status": "unknown",
+            "icon": "🧠"
+        },
+        "resend": {
+            "name": "Resend (Email)",
+            "has_api": False,
+            "link": "https://resend.com/billing",
+            "message": "Check dashboard for email credits",
+            "status": "unknown",
+            "icon": "📧"
+        },
+        "serper": {
+            "name": "Serper.dev",
+            "has_api": False,
+            "link": "https://serper.dev/usage",
+            "message": "Check dashboard for API credits",
+            "status": "unknown",
+            "icon": "🔍"
+        },
+        "supabase": {
+            "name": "Supabase",
+            "has_api": False,
+            "link": "https://supabase.com/dashboard/project/_/settings/billing",
+            "message": "Check dashboard for usage",
+            "status": "unknown",
+            "icon": "🗄️"
+        },
+        "railway": {
+            "name": "Railway",
+            "has_api": False,
+            "link": "https://railway.app/account/billing",
+            "message": "Check dashboard for credits",
+            "status": "unknown",
+            "icon": "🚂"
+        },
+        "lovable": {
+            "name": "Lovable (Frontend)",
+            "has_api": False,
+            "link": "https://lovable.dev/settings/billing",
+            "message": "Check dashboard for subscription",
+            "status": "unknown",
+            "icon": "💜"
+        }
+    }
+    
+    import requests
+    
+    # DataForSEO
     try:
-        return jsonify(get_system_health())
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        resp = requests.post(
+            "https://api.dataforseo.com/v3/serp/google/jobs/task_post",
+            auth=(os.environ.get("DATAFORSEO_LOGIN"), os.environ.get("DATAFORSEO_PASSWORD")),
+            json=[{"keyword": "test", "location_name": "United Arab Emirates"}],
+            timeout=10
+        )
+        if resp.status_code == 200:
+            credits["dataforseo"]["status"] = "healthy"
+        elif resp.status_code == 402:
+            credits["dataforseo"]["status"] = "error"
+            credits["dataforseo"]["message"] = "⚠️ Payment Required - Check balance"
+        else:
+            credits["dataforseo"]["status"] = "degraded"
+    except:
+        credits["dataforseo"]["status"] = "error"
+    
+    # Gemini
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if gemini_key:
+        try:
+            resp = requests.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}", timeout=10)
+            if resp.status_code == 200:
+                credits["gemini"]["status"] = "healthy"
+            elif resp.status_code == 403:
+                credits["gemini"]["status"] = "error"
+                credits["gemini"]["message"] = "Invalid or expired API key"
+            else:
+                credits["gemini"]["status"] = "degraded"
+        except:
+            credits["gemini"]["status"] = "error"
+    else:
+        credits["gemini"]["status"] = "missing"
+    
+    # Anthropic
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    if anthropic_key:
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": anthropic_key, "anthropic-version": "2023-06-01"},
+                json={"model": "claude-3-haiku-20240307", "max_tokens": 1, "messages": [{"role": "user", "content": "Hi"}]},
+                timeout=10
+            )
+            if resp.status_code == 401:
+                credits["anthropic"]["status"] = "error"
+                credits["anthropic"]["message"] = "Invalid API key"
+            elif resp.status_code == 200 or resp.status_code == 400:
+                credits["anthropic"]["status"] = "healthy"
+            else:
+                credits["anthropic"]["status"] = "degraded"
+        except:
+            credits["anthropic"]["status"] = "error"
+    else:
+        credits["anthropic"]["status"] = "missing"
+    
+    # Resend
+    resend_key = os.environ.get("RESEND_API_KEY")
+    if resend_key:
+        credits["resend"]["status"] = "configured"
+    else:
+        credits["resend"]["status"] = "missing"
+    
+    # Serper
+    serper_key = os.environ.get("SERPER_API_KEY")
+    if serper_key:
+        credits["serper"]["status"] = "configured"
+    else:
+        credits["serper"]["status"] = "missing"
+    
+    # Supabase
+    try:
+        supabase.table("users").select("id").limit(1).execute()
+        credits["supabase"]["status"] = "healthy"
+    except:
+        credits["supabase"]["status"] = "error"
+    
+    # Railway status page
+    try:
+        resp = requests.get("https://status.railway.app/api/status", timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            all_good = all(c.get("status") == "operational" for c in data.get("components", []))
+            credits["railway"]["status"] = "healthy" if all_good else "degraded"
+            if not all_good:
+                down_services = [c.get("name") for c in data.get("components", []) if c.get("status") != "operational"]
+                credits["railway"]["message"] = f"Down: {', '.join(down_services)}"
+        else:
+            credits["railway"]["status"] = "unknown"
+    except:
+        credits["railway"]["status"] = "unknown"
+    
+    # Lovable frontend
+    try:
+        resp = requests.get("https://jobhunter.ae", timeout=5)
+        if resp.status_code == 200:
+            credits["lovable"]["status"] = "healthy"
+        else:
+            credits["lovable"]["status"] = "degraded"
+    except:
+        credits["lovable"]["status"] = "error"
+    
+    return jsonify(credits)
+
+@app.route('/api/seo-status')
+def api_seo_status():
+    """Check Google Analytics and SEO metrics"""
+    
+    import requests
+    from bs4 import BeautifulSoup
+    
+    seo = {
+        "google_analytics": {
+            "configured": False,
+            "tracking_id": None,
+            "status": "missing",
+            "setup_link": "https://analytics.google.com/",
+            "icon": "📊"
+        },
+        "google_search_console": {
+            "configured": False,
+            "status": "missing",
+            "setup_link": "https://search.google.com/search-console",
+            "icon": "🔎"
+        },
+        "sitemap": {
+            "exists": False,
+            "url": "https://jobhunter.ae/sitemap.xml",
+            "status": "unknown",
+            "icon": "🗺️"
+        },
+        "robots_txt": {
+            "exists": False,
+            "url": "https://jobhunter.ae/robots.txt",
+            "status": "unknown",
+            "icon": "🤖"
+        },
+        "meta_tags": {
+            "title": None,
+            "description": None,
+            "status": "unknown",
+            "icon": "📝"
+        },
+        "performance": {
+            "load_time_ms": None,
+            "status": "unknown",
+            "icon": "⚡"
+        }
+    }
+    
+    # Check sitemap
+    try:
+        resp = requests.get("https://jobhunter.ae/sitemap.xml", timeout=5)
+        if resp.status_code == 200:
+            seo["sitemap"]["exists"] = True
+            seo["sitemap"]["status"] = "healthy"
+        else:
+            seo["sitemap"]["status"] = "missing"
+    except:
+        seo["sitemap"]["status"] = "unreachable"
+    
+    # Check robots.txt
+    try:
+        resp = requests.get("https://jobhunter.ae/robots.txt", timeout=5)
+        if resp.status_code == 200:
+            seo["robots_txt"]["exists"] = True
+            seo["robots_txt"]["status"] = "healthy"
+            if "sitemap" in resp.text.lower():
+                seo["robots_txt"]["sitemap_referenced"] = True
+        else:
+            seo["robots_txt"]["status"] = "missing"
+    except:
+        seo["robots_txt"]["status"] = "unreachable"
+    
+    # Check meta tags and performance
+    try:
+        start_time = datetime.now()
+        resp = requests.get("https://jobhunter.ae", timeout=10)
+        load_time = (datetime.now() - start_time).total_seconds() * 1000
+        
+        seo["performance"]["load_time_ms"] = round(load_time, 0)
+        if load_time < 1000:
+            seo["performance"]["status"] = "excellent"
+        elif load_time < 2000:
+            seo["performance"]["status"] = "good"
+        elif load_time < 4000:
+            seo["performance"]["status"] = "fair"
+        else:
+            seo["performance"]["status"] = "poor"
+        
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            title_tag = soup.find('title')
+            meta_desc = soup.find('meta', attrs={'name': 'description'})
+            seo["meta_tags"]["title"] = title_tag.text.strip() if title_tag else None
+            seo["meta_tags"]["description"] = meta_desc.get('content', '').strip() if meta_desc else None
+            
+            # Check for GA tracking
+            ga_present = 'gtag' in resp.text or 'google-analytics' in resp.text or 'G-' in resp.text
+            if ga_present:
+                seo["google_analytics"]["configured"] = True
+                seo["google_analytics"]["status"] = "healthy"
+                
+                # Try to extract GA ID
+                import re
+                ga_match = re.search(r'G-[A-Z0-9]+', resp.text)
+                if ga_match:
+                    seo["google_analytics"]["tracking_id"] = ga_match.group(0)
+            
+            if seo["meta_tags"]["title"] and seo["meta_tags"]["description"]:
+                seo["meta_tags"]["status"] = "healthy"
+            elif seo["meta_tags"]["title"]:
+                seo["meta_tags"]["status"] = "warning"
+            else:
+                seo["meta_tags"]["status"] = "error"
+    except:
+        seo["meta_tags"]["status"] = "unreachable"
+    
+    return jsonify(seo)
 
 @app.route('/api/logs')
 def api_logs():
@@ -319,7 +555,6 @@ def api_add_title():
 
 @app.route('/api/can-edit-titles', methods=['POST'])
 def api_can_edit_titles():
-    from datetime import timedelta
     data = request.json or {}
     user_id = data.get("user_id")
     if not user_id:
@@ -474,466 +709,4 @@ def build_dashboard_html():
         started = (l.get("started_at") or "")[:16].replace("T", " ")
         finished = (l.get("finished_at") or "&mdash;")[:16].replace("T", " ")
         view_btn = f'<button onclick=\'showLog("{lid}")\' style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">View</button>'
-        rows.append(f"<tr><td>{i}</td><td>{started}</td><td>{finished}</td><td>{badge}</td><td>{l.get('total_scraped') or 0}</td><td>{l.get('total_saved') or 0}</td><td>{view_btn}</td></tr>")
-    logs_html = "".join(rows) or '<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">No logs yet</td></tr>'
-    
-    # Build feedback rows
-    rows = []
-    for i, f in enumerate(feedback, 1):
-        rating = f.get("rating") or 0
-        stars = "★" * int(rating) + "☆" * (5 - int(rating)) if rating else "—"
-        when = (f.get("created_at") or "")[:16].replace("T", " ")
-        comment = (f.get("comment") or "").replace("<", "&lt;").replace(">", "&gt;") or "—"
-        rows.append(f"<tr><td>{i}</td><td style=\"white-space:nowrap\">{when}</td><td style=\"color:#f59e0b\">{stars}</td><td>{comment}</td><td style=\"font-size:12px;color:#64748b\">{f.get('email') or 'anonymous'}</td></tr>")
-    feedback_html = "".join(rows) or '<tr><td colspan="5" style="text-align:center;padding:32px;color:#94a3b8">No feedback yet</td></tr>'
-    
-    scraped_today = len([t for t in titles if (t.get("last_scraped") or "")[:10] == today])
-    
-    page = f"""<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>JobHunter Admin</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<style>
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b}}
-.hdr{{background:linear-gradient(135deg,#1e40af,#3b82f6);color:white;padding:20px 32px;display:flex;justify-content:space-between;align-items:center}}
-.hdr h1{{font-size:22px;font-weight:700}}
-.wrap{{max-width:1400px;margin:0 auto;padding:24px 16px}}
-.stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:16px;margin-bottom:24px}}
-.stat{{background:white;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
-.stat .v{{font-size:28px;font-weight:700;color:#1e40af}}
-.stat .l{{font-size:12px;color:#64748b;margin-top:4px}}
-.stat .s{{font-size:11px;color:#22c55e;margin-top:8px}}
-.card{{background:white;border-radius:12px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:20px}}
-.tabs{{display:flex;gap:4px;margin-bottom:20px;border-bottom:2px solid #e2e8f0;flex-wrap:wrap}}
-.tab{{padding:10px 20px;cursor:pointer;font-size:14px;font-weight:500;color:#64748b;border-bottom:2px solid transparent;margin-bottom:-2px}}
-.tab.on{{color:#2563eb;border-bottom-color:#2563eb}}
-.pane{{display:none}}.pane.on{{display:block}}
-table{{width:100%;border-collapse:collapse}}
-th{{text-align:left;font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;padding:8px 12px;border-bottom:2px solid #f1f5f9}}
-td{{padding:10px 12px;border-bottom:1px solid #f8fafc;font-size:14px}}
-tr:hover td{{background:#f8fafc}}
-.log-box{{background:#0f172a;color:#94a3b8;border-radius:8px;padding:16px;font-family:monospace;font-size:12px;max-height:400px;overflow-y:auto;margin-top:12px;white-space:pre-wrap;line-height:1.6}}
-.sp{{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:6px}}
-@keyframes spin{{to{{transform:rotate(360deg)}}}}
-input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px}}
-#msg{{margin-top:16px;font-size:14px;color:#64748b}}
-.chart-container{{max-width:400px;margin:0 auto}}
-.health-dot{{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px}}
-.health-dot.green{{background:#22c55e}}
-.health-dot.yellow{{background:#f59e0b}}
-.health-dot.red{{background:#dc2626}}
-</style></head>
-<body>
-<div class="hdr">
-  <div><h1>JobHunter Admin</h1><small style="opacity:.8;font-size:13px">Backend dashboard</small></div>
-  <div style="text-align:right;font-size:13px;opacity:.9">{len(jobs)} jobs · {len(titles)} titles · {len(users)} users</div>
-</div>
-<div class="wrap">
-  <div class="tabs">
-    <div class="tab on" onclick="show('overview',this)">Overview</div>
-    <div class="tab" onclick="show('jobs',this)">Job Pool</div>
-    <div class="tab" onclick="show('titles',this)">Titles</div>
-    <div class="tab" onclick="show('users',this)">Users</div>
-    <div class="tab" onclick="show('scraper',this)">Run Scraper</div>
-    <div class="tab" onclick="show('logs',this)">Logs</div>
-    <div class="tab" onclick="show('feedback',this)">Feedback</div>
-    <div class="tab" onclick="show('analytics',this)">Analytics</div>
-    <div class="tab" onclick="show('health',this)">System Health</div>
-  </div>
-  
-  <!-- Overview Tab -->
-  <div id="overview" class="pane on">
-    <div class="stats" id="overview-stats">Loading...</div>
-  </div>
-  
-  <!-- Job Pool Tab -->
-  <div id="jobs" class="pane card">
-    <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">
-      <input id="qs" placeholder="Search..." oninput="filter()" style="flex:1;min-width:200px">
-      <select id="qp" onchange="filter()"><option value="">All Platforms</option><option>LinkedIn</option><option>Indeed</option><option>Bayt.com</option><option>Naukrigulf</option><option>GulfTalent.com</option></select>
-    </div>
-    <table id="jt"><thead><tr><th>#</th><th>Title</th><th>Company</th><th>Location</th><th>Platform</th><th>Posted</th><th>Salary</th><th>Score</th><th></th></tr></thead>
-    <tbody>{jobs_html}</tbody></table>
-  </div>
-  
-  <!-- Titles Tab -->
-  <div id="titles" class="pane card">
-    <table><thead><tr><th>#</th><th>Keyword</th><th>Last Scraped</th><th>Requests</th><th>Status</th><th></th></tr></thead>
-    <tbody>{titles_html}</tbody></table>
-  </div>
-  
-  <!-- Users Tab -->
-  <div id="users" class="pane card">
-    <table><thead><tr><th>#</th><th>Name</th><th>Email</th><th>Gender</th><th>CV</th><th>Joined</th><th>Last Active</th><th>Active</th><th></th></tr></thead>
-    <tbody>{users_html}</tbody></table>
-  </div>
-  
-  <!-- Scraper Tab -->
-  <div id="scraper" class="pane card">
-    <h2 style="margin-bottom:16px">Run Scraper</h2>
-    <p style="color:#64748b;font-size:14px;margin-bottom:20px">Scrapes all active titles. Respects 24h cache. Daily ceiling: 200 scrapes.</p>
-    <div style="display:flex;gap:12px;flex-wrap:wrap">
-      <button id="sb" onclick="runScraper()" style="background:#2563eb;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">▶ Run Scraper Now</button>
-      <button id="eb" onclick="runEmail()" style="background:#059669;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">Score + Email Users</button>
-    </div>
-    <div id="msg"></div>
-  </div>
-  
-  <!-- Logs Tab -->
-  <div id="logs" class="pane card">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-      <h2 style="margin:0">Scrape Logs</h2>
-      <button onclick="loadLogs()" style="background:#f1f5f9;color:#64748b;padding:6px 12px;border:none;border-radius:8px;cursor:pointer;font-size:13px">Refresh</button>
-    </div>
-    <table><thead><tr><th>#</th><th>Started</th><th>Finished</th><th>Status</th><th>Scraped</th><th>Saved</th><th></th></tr></thead>
-    <tbody id="lb">{logs_html}</tbody></table>
-    <div id="ld" style="display:none;margin-top:16px">
-      <div style="display:flex;justify-content:space-between;margin-bottom:8px">
-        <strong>Log Detail</strong>
-        <button onclick="document.getElementById('ld').style.display='none'" style="background:#f1f5f9;border:none;padding:4px 10px;border-radius:6px;cursor:pointer">Close</button>
-      </div>
-      <div id="lc" class="log-box">Loading...</div>
-    </div>
-  </div>
-  
-  <!-- Feedback Tab -->
-  <div id="feedback" class="pane card">
-    <h2 style="margin-bottom:16px">User Feedback</h2>
-    <table><thead><tr><th>#</th><th>Date</th><th>Rating</th><th>Comment</th><th>From</th></tr></thead>
-    <tbody>{feedback_html}</tbody></table>
-  </div>
-  
-  <!-- Analytics Tab -->
-  <div id="analytics" class="pane card">
-    <h2 style="margin-bottom:20px">Analytics Dashboard</h2>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(350px,1fr));gap:24px">
-      <div>
-        <h3 style="font-size:16px;margin-bottom:12px">Jobs Over Time (30 days)</h3>
-        <canvas id="jobsChart" height="200"></canvas>
-      </div>
-      <div>
-        <h3 style="font-size:16px;margin-bottom:12px">Industry Distribution</h3>
-        <canvas id="industryChart" height="200"></canvas>
-      </div>
-      <div>
-        <h3 style="font-size:16px;margin-bottom:12px">Match Score Distribution</h3>
-        <canvas id="scoreChart" height="200"></canvas>
-      </div>
-      <div>
-        <h3 style="font-size:16px;margin-bottom:12px">Users Over Time (30 days)</h3>
-        <canvas id="usersChart" height="200"></canvas>
-      </div>
-      <div>
-        <h3 style="font-size:16px;margin-bottom:12px">Gender Distribution</h3>
-        <canvas id="genderChart" height="200"></canvas>
-      </div>
-      <div>
-        <h3 style="font-size:16px;margin-bottom:12px">CV Upload Rate</h3>
-        <canvas id="cvChart" height="200"></canvas>
-      </div>
-    </div>
-  </div>
-  
-  <!-- System Health Tab -->
-  <div id="health" class="pane card">
-    <h2 style="margin-bottom:20px">System Health</h2>
-    <div id="health-status">Loading...</div>
-  </div>
-</div>
-
-<script>
-// Tab switching
-function show(id, el){{
-  document.querySelectorAll('.pane').forEach(p => p.className = 'pane');
-  document.querySelectorAll('.tab').forEach(t => t.className = 'tab');
-  document.getElementById(id).className = 'pane on';
-  el.className = 'tab on';
-  if(id === 'logs') loadLogs();
-  if(id === 'analytics') loadAnalytics();
-  if(id === 'health') loadHealth();
-  if(id === 'overview') loadOverview();
-}}
-
-// Job pool filter
-function filter(){{
-  var q = document.getElementById('qs').value.toLowerCase();
-  var p = document.getElementById('qp').value.toLowerCase();
-  document.querySelectorAll('#jt tbody tr').forEach(r => {{
-    var t = r.textContent.toLowerCase();
-    r.style.display = (!q || t.indexOf(q) > -1) && (!p || t.indexOf(p) > -1) ? '' : 'none';
-  }});
-}}
-
-// Overview
-function loadOverview(){{
-  fetch('/api/analytics')
-    .then(r => r.json())
-    .then(d => {{
-      if(d.error) {{
-        document.getElementById('overview-stats').innerHTML = '<div class="stat">Error loading data</div>';
-        return;
-      }}
-      var o = d.overview;
-      var html = `
-        <div class="stat"><div class="v">${{o.total_jobs}}</div><div class="l">Total Jobs</div></div>
-        <div class="stat"><div class="v">+${{o.new_jobs_24h}}</div><div class="l">New Jobs (24h)</div></div>
-        <div class="stat"><div class="v">${{o.active_users}}/${{o.total_users}}</div><div class="l">Active / Total Users</div></div>
-        <div class="stat"><div class="v">${{o.scrapes_today}}/${{o.daily_limit}}</div><div class="l">Scrapes Today</div><div class="s">${{o.scrapes_remaining}} remaining</div></div>
-        <div class="stat"><div class="v">${{o.avg_match_score}}%</div><div class="l">Avg Match Score</div><div class="s">${{o.high_matches}} high matches</div></div>
-        <div class="stat"><div class="v">${{o.total_matches}}</div><div class="l">Total Matches</div></div>
-        <div class="stat"><div class="v">${{o.cv_upload_rate}}%</div><div class="l">CV Upload Rate</div></div>
-      `;
-      document.getElementById('overview-stats').innerHTML = html;
-    }})
-    .catch(e => {{
-      document.getElementById('overview-stats').innerHTML = '<div class="stat">Error: ' + e + '</div>';
-    }});
-}}
-
-// Analytics
-let jobsChart, industryChart, scoreChart, usersChart, genderChart, cvChart;
-
-function loadAnalytics(){{
-  fetch('/api/analytics')
-    .then(r => r.json())
-    .then(d => {{
-      if(d.error) return;
-      
-      // Jobs over time
-      if(jobsChart) jobsChart.destroy();
-      var ctx = document.getElementById('jobsChart').getContext('2d');
-      jobsChart = new Chart(ctx, {{
-        type: 'line',
-        data: {{
-          labels: d.jobs_over_time.map(x => x.date).reverse(),
-          datasets: [{{
-            label: 'Jobs Added',
-            data: d.jobs_over_time.map(x => x.count).reverse(),
-            borderColor: '#2563eb',
-            fill: false
-          }}]
-        }},
-        options: {{ responsive: true, maintainAspectRatio: true }}
-      }});
-      
-      // Industry distribution
-      if(industryChart) industryChart.destroy();
-      var ctx2 = document.getElementById('industryChart').getContext('2d');
-      industryChart = new Chart(ctx2, {{
-        type: 'pie',
-        data: {{
-          labels: d.industry_distribution.map(x => x.name),
-          datasets: [{{
-            data: d.industry_distribution.map(x => x.count),
-            backgroundColor: ['#2563eb', '#dc2626', '#f59e0b', '#10b981', '#8b5cf6']
-          }}]
-        }},
-        options: {{ responsive: true, maintainAspectRatio: true }}
-      }});
-      
-      // Score distribution
-      if(scoreChart) scoreChart.destroy();
-      var ctx3 = document.getElementById('scoreChart').getContext('2d');
-      scoreChart = new Chart(ctx3, {{
-        type: 'bar',
-        data: {{
-          labels: Object.keys(d.score_distribution),
-          datasets: [{{
-            label: 'Matches',
-            data: Object.values(d.score_distribution),
-            backgroundColor: '#f59e0b'
-          }}]
-        }},
-        options: {{ responsive: true, maintainAspectRatio: true }}
-      }});
-      
-      // Users over time
-      if(usersChart) usersChart.destroy();
-      var ctx4 = document.getElementById('usersChart').getContext('2d');
-      usersChart = new Chart(ctx4, {{
-        type: 'line',
-        data: {{
-          labels: d.users_over_time.map(x => x.date).reverse(),
-          datasets: [{{
-            label: 'Users Added',
-            data: d.users_over_time.map(x => x.count).reverse(),
-            borderColor: '#10b981',
-            fill: false
-          }}]
-        }},
-        options: {{ responsive: true, maintainAspectRatio: true }}
-      }});
-      
-      // Gender distribution
-      if(genderChart) genderChart.destroy();
-      var ctx5 = document.getElementById('genderChart').getContext('2d');
-      genderChart = new Chart(ctx5, {{
-        type: 'pie',
-        data: {{
-          labels: ['Male', 'Female', 'Prefer not to say'],
-          datasets: [{{
-            data: [d.gender_distribution.male, d.gender_distribution.female, d.gender_distribution.prefer_not_to_say],
-            backgroundColor: ['#3b82f6', '#ec489a', '#94a3b8']
-          }}]
-        }},
-        options: {{ responsive: true, maintainAspectRatio: true }}
-      }});
-      
-      // CV rate
-      if(cvChart) cvChart.destroy();
-      var ctx6 = document.getElementById('cvChart').getContext('2d');
-      cvChart = new Chart(ctx6, {{
-        type: 'doughnut',
-        data: {{
-          labels: ['CV Uploaded', 'No CV'],
-          datasets: [{{
-            data: [d.overview.cv_upload_rate, 100 - d.overview.cv_upload_rate],
-            backgroundColor: ['#10b981', '#e2e8f0']
-          }}]
-        }},
-        options: {{ responsive: true, maintainAspectRatio: true }}
-      }});
-    }});
-}}
-
-// System Health
-function loadHealth(){{
-  fetch('/api/system-health')
-    .then(r => r.json())
-    .then(h => {{
-      var html = '<div style="display:grid;gap:16px">';
-      for(var service in h){{
-        var status = h[service];
-        var dotClass = 'health-dot ';
-        if(status.status === 'healthy') dotClass += 'green';
-        else if(status.status === 'degraded') dotClass += 'yellow';
-        else dotClass += 'red';
-        html += `
-          <div style="background:#f8fafc;padding:16px;border-radius:8px;display:flex;justify-content:space-between;align-items:center">
-            <div>
-              <span class="${{dotClass}}"></span>
-              <strong style="text-transform:capitalize">${{service}}</strong>
-            </div>
-            <div style="font-size:12px;color:${{status.status === 'healthy' ? '#22c55e' : '#dc2626'}}">
-              ${{status.status}} ${{status.error ? '('+status.error+')' : ''}}
-            </div>
-          </div>
-        `;
-      }}
-      html += '</div>';
-      document.getElementById('health-status').innerHTML = html;
-    }});
-}}
-
-// Scraper functions
-function setMsg(h){{
-  var e = document.getElementById('msg');
-  e.style.display = 'block';
-  e.innerHTML = h;
-}}
-
-function runScraper(){{
-  var b = document.getElementById('sb');
-  b.disabled = true;
-  b.innerHTML = '<span class="sp"></span>Starting...';
-  setMsg('Scraper running in background...');
-  fetch('/api/run-scraper',{{method:'POST'}})
-    .then(r => r.json())
-    .then(() => {{
-      b.disabled = false;
-      b.innerHTML = '▶ Run Scraper Now';
-      setMsg('Started! Check Logs tab in 30 seconds.');
-    }})
-    .catch(e => {{
-      b.disabled = false;
-      b.innerHTML = '▶ Run Scraper Now';
-      setMsg('Error: ' + e);
-    }});
-}}
-
-function runEmail(){{
-  var b = document.getElementById('eb');
-  b.disabled = true;
-  b.innerHTML = '<span class="sp"></span>Processing...';
-  setMsg('Scoring and emailing...');
-  fetch('/api/score-and-email',{{method:'POST'}})
-    .then(r => r.json())
-    .then(d => {{
-      b.disabled = false;
-      b.innerHTML = 'Score + Email Users';
-      var h = '';
-      for(var i=0;i<d.log.length;i++) h += '<div>' + d.log[i] + '</div>';
-      setMsg(h);
-    }})
-    .catch(e => {{
-      b.disabled = false;
-      b.innerHTML = 'Score + Email Users';
-      setMsg('Error: ' + e);
-    }});
-}}
-
-function loadLogs(){{
-  fetch('/api/logs').then(r => r.json()).then(d => {{
-    var b = document.getElementById('lb');
-    if(!d.logs||!d.logs.length){{
-      b.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">No logs yet</td></tr>';
-      return;
-    }}
-    var h = '';
-    for(var i=0;i<d.logs.length;i++){{
-      var l = d.logs[i];
-      var s = l.status||'';
-      var bg = s==='success'?'#dcfce7;color:#166534':s==='error'?'#fee2e2;color:#991b1b':'#dbeafe;color:#1d4ed8';
-      h += `<tr><td>${{i+1}}</td><td>${{(l.started_at||'').slice(0,16).replace('T',' ')}}</td><td>${{(l.finished_at||'').slice(0,16).replace('T',' ')}}</td>`;
-      h += `<td><span style="background:${{bg}};padding:2px 8px;border-radius:20px;font-size:12px">${{s}}</span></td>`;
-      h += `<td>${{l.total_scraped||0}}</td><td>${{l.total_saved||0}}</td>`;
-      h += `<td><button class="vlog" data-id="${{l.id}}" style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">View</button></td></tr>`;
-    }}
-    b.innerHTML = h;
-    document.querySelectorAll('.vlog').forEach(btn => {{
-      btn.addEventListener('click', function(){{ showLog(this.getAttribute('data-id')); }});
-    }});
-  }});
-}}
-
-function showLog(id){{
-  var d = document.getElementById('ld');
-  var c = document.getElementById('lc');
-  d.style.display = 'block';
-  c.textContent = 'Loading...';
-  d.scrollIntoView({{behavior:'smooth'}});
-  fetch('/api/logs/'+id).then(r => r.json()).then(d => {{ c.textContent = d.log_text||'No content yet'; c.scrollTop = c.scrollHeight; }});
-}}
-
-function delTitle(id){{
-  if(!confirm('Delete this title from the pool? This cannot be undone.')) return;
-  fetch('/api/delete-title',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{id:id}})}})
-    .then(r => r.json())
-    .then(d => {{ if(d.ok){{ location.reload(); }}else{{ alert('Error: '+(d.error||'failed')); }} }})
-    .catch(e => {{ alert('Error: '+e); }});
-}}
-
-function delUser(id){{
-  if(!confirm('Delete this user and all their matches/titles links? This cannot be undone.')) return;
-  fetch('/api/delete-user',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{id:id}})}})
-    .then(r => r.json())
-    .then(d => {{ if(d.ok){{ location.reload(); }}else{{ alert('Error: '+(d.error||'failed')); }} }})
-    .catch(e => {{ alert('Error: '+e); }});
-}}
-
-// Load overview on page load
-loadOverview();
-</script>
-</body></html>"""
-    
-    page = page.replace("JOBCOUNT", str(len(jobs)))
-    page = page.replace("TITLECOUNT", str(len(titles)))
-    page = page.replace("USERCOUNT", str(len(users)))
-    page = page.replace("TODAYCOUNT", str(scraped_today))
-    page = page.replace("LOGCOUNT", str(len(logs)))
-    
-    return page
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+        rows
