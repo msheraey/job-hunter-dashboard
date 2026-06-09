@@ -4,7 +4,7 @@ JobHunter Scraper v2 — Multi-user, on-demand pool architecture
 - DataForSEO Google Jobs API
 - Supabase for storage (service role key — bypasses RLS)
 - On-demand scraping with 24h TTL cache
-- AI scoring via Groq (free) with Claude Haiku fallback
+- AI scoring via Google Gemini 2.5 Flash (free) with Claude Haiku fallback
 - Gender eligibility filter
 - Daily spend ceiling protection
 - Full run logging to Supabase scrape_logs table
@@ -15,6 +15,8 @@ import re
 import time
 import requests
 import json
+import threading
+from collections import deque
 from datetime import datetime, timezone, timedelta
 from supabase import create_client
 
@@ -23,13 +25,48 @@ DATAFORSEO_LOGIN    = os.environ.get("DATAFORSEO_LOGIN")
 DATAFORSEO_PASSWORD = os.environ.get("DATAFORSEO_PASSWORD")
 SUPABASE_URL        = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY        = os.environ.get("SUPABASE_SERVICE_KEY")
-GROQ_API_KEY        = os.environ.get("GROQ_API_KEY")
+GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY")
 ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY")
+
+# Validate required env vars at startup
+REQUIRED_ENV_VARS = [
+    "DATAFORSEO_LOGIN",
+    "DATAFORSEO_PASSWORD", 
+    "SUPABASE_URL",
+    "SUPABASE_SERVICE_KEY",
+    "GEMINI_API_KEY"
+]
+for var in REQUIRED_ENV_VARS:
+    if not os.environ.get(var):
+        raise RuntimeError(f"Missing required env var: {var}")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TTL_HOURS = 24
 MAX_DAILY_SCRAPES = 200
+
+# ── Rate Limiter for Gemini ─────────────────────────────────────────────────
+class RateLimiter:
+    def __init__(self, requests_per_minute=20):
+        self.requests_per_minute = requests_per_minute
+        self.requests = deque()
+        self.lock = threading.Lock()
+    
+    def wait_if_needed(self):
+        with self.lock:
+            now = time.time()
+            while self.requests and self.requests[0] < now - 60:
+                self.requests.popleft()
+            
+            if len(self.requests) >= self.requests_per_minute:
+                wait_time = 60 - (now - self.requests[0])
+                if wait_time > 0:
+                    time.sleep(wait_time + 0.5)
+                    return self.wait_if_needed()
+            
+            self.requests.append(time.time())
+
+gemini_limiter = RateLimiter(requests_per_minute=15)
 
 # ── Trusted platforms ──────────────────────────────────────────────────────
 TRUSTED_DOMAINS = [
@@ -89,7 +126,6 @@ def validate_title(title):
         return False
     return True
 
-
 # ── Logger class ───────────────────────────────────────────────────────────
 class RunLogger:
     def __init__(self, run_type="scraper"):
@@ -121,7 +157,6 @@ class RunLogger:
         self.lines.append(line)
         if print_it:
             print(msg)
-        # Save to DB every 5 lines
         if len(self.lines) % 5 == 0:
             self._flush()
 
@@ -155,14 +190,14 @@ class RunLogger:
         except Exception as e:
             print(f"⚠️ Log finish error: {e}")
 
-
 # ── Spend ceiling ──────────────────────────────────────────────────────────
 def get_today_scrape_count():
     try:
         today = datetime.now(timezone.utc).date().isoformat()
         result = supabase.table("title_pool").select("id").gte("last_scraped", today).execute()
         return len(result.data or [])
-    except:
+    except Exception as e:
+        print(f"Error getting scrape count: {e}")
         return 0
 
 def is_over_daily_ceiling():
@@ -172,8 +207,7 @@ def is_over_daily_ceiling():
         return True
     return False
 
-
-# ── DataForSEO ─────────────────────────────────────────────────────────────
+# ── DataForSEO with proper error handling ─────────────────────────────────
 def dataforseo_search(keyword, logger=None):
     def log(msg):
         if logger:
@@ -183,6 +217,7 @@ def dataforseo_search(keyword, logger=None):
 
     try:
         log(f"  📡 Posting task to DataForSEO for '{keyword}'...")
+        
         post_resp = requests.post(
             "https://api.dataforseo.com/v3/serp/google/jobs/task_post",
             auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
@@ -194,69 +229,72 @@ def dataforseo_search(keyword, logger=None):
             }],
             timeout=30
         )
-        post_data = post_resp.json()
-        tasks = post_data.get("tasks", [])
-
-        if not tasks or tasks[0].get("status_code") not in [20000, 20100]:
-            log(f"  ❌ task_post failed: {post_data.get('status_message','unknown error')}")
+        
+        if post_resp.status_code != 200:
+            log(f"  ❌ HTTP {post_resp.status_code}: {post_resp.text[:200]}")
             return []
+        
+        post_data = post_resp.json()
+        
+        if not post_data.get("tasks"):
+            log(f"  ❌ No tasks in response")
+            return []
+        
+        task = post_data["tasks"][0]
+        if task.get("status_code") not in [20000, 20100]:
+            log(f"  ❌ task_post failed: {task.get('status_message', 'unknown')}")
+            return []
+        
+        task_id = task.get("id")
+        if not task_id:
+            log(f"  ❌ No task ID received")
+            return []
+            
+        log(f"  ✅ Task created: {task_id}")
 
-        task_id = tasks[0].get("id")
-        log(f"  ✅ Task created: {task_id} — waiting 10s...")
-
-        # Retry fetching results — DataForSEO can take 10-30s
         items = None
-        for attempt in range(5):
-            wait = 8 if attempt == 0 else 6
+        for attempt in range(8):
+            wait = [3, 5, 8, 12, 15, 20, 25, 30][attempt]
+            log(f"  📥 Waiting {wait}s (attempt {attempt + 1}/8)...")
             time.sleep(wait)
-            log(f"  📥 Fetching results (attempt {attempt + 1}/5)...")
+            
             get_resp = requests.get(
                 f"https://api.dataforseo.com/v3/serp/google/jobs/task_get/advanced/{task_id}",
                 auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
                 timeout=30
             )
+            
+            if get_resp.status_code != 200:
+                log(f"  ⚠️ HTTP {get_resp.status_code}, retrying...")
+                continue
+                
             get_data = get_resp.json()
-            result_tasks = get_data.get("tasks", [])
-            if result_tasks and result_tasks[0].get("result"):
-                items = result_tasks[0]["result"][0].get("items", [])
-                break
-            log(f"  ⏳ Not ready yet, retrying...")
+            
+            if not get_data.get("tasks"):
+                continue
+                
+            result_tasks = get_data["tasks"][0].get("result")
+            if result_tasks and len(result_tasks) > 0:
+                items = result_tasks[0].get("items", [])
+                if items:
+                    log(f"  ✅ Got {len(items)} results")
+                    break
+                else:
+                    log(f"  ⚠️ No items in result, retrying...")
+            else:
+                log(f"  ⏳ No result yet, retrying...")
 
-        if items is None:
-            log(f"  ⚠️ No results after 5 attempts for task {task_id}")
+        if not items:
+            log(f"  ❌ No results after 8 attempts")
             return []
 
-        log(f"  📋 Got {len(items)} raw results")
         return items
 
     except Exception as e:
         log(f"  ❌ DataForSEO error: {e}")
         return []
 
-
-# ── AI Scoring ─────────────────────────────────────────────────────────────
-def _extract_score(text):
-    """Pull an integer 0-100 score from any messy AI response."""
-    if not text:
-        return None
-    # Try JSON first
-    try:
-        cleaned = re.sub(r'```json|```', '', text).strip()
-        # grab first {...} block if present
-        m = re.search(r'\{[^}]*\}', cleaned, re.DOTALL)
-        if m:
-            val = json.loads(m.group(0)).get("score")
-            if val is not None:
-                return max(0, min(100, int(val)))
-    except Exception:
-        pass
-    # Fallback: first number 0-100 in the text
-    m = re.search(r'\b(\d{1,3})\b', text)
-    if m:
-        return max(0, min(100, int(m.group(1))))
-    return None
-
-
+# ── AI Scoring with Google Gemini 2.5 Flash ────────────────────────────────
 INDUSTRY_LIST = [
     "Healthcare & Pharmacy", "Retail", "FMCG", "Logistics & Supply Chain",
     "Technology", "Finance & Banking", "Hospitality & Tourism",
@@ -265,7 +303,6 @@ INDUSTRY_LIST = [
 ]
 
 def _extract_score_and_industry(text):
-    """Extract score (int) and industry (str) from AI response."""
     score = None
     industry = None
     try:
@@ -285,8 +322,7 @@ def _extract_score_and_industry(text):
             score = max(0, min(100, int(m.group(1))))
     return score, industry
 
-
-def score_job_with_groq(job_title, job_company, job_description, user_profile):
+def score_job_with_gemini(job_title, job_company, job_description, user_profile):
     industry_options = ", ".join(INDUSTRY_LIST)
     prompt = f"""You are a job matching expert. Score how well this job matches the candidate and identify the job industry.
 
@@ -296,35 +332,64 @@ Company: {job_company}
 Description: {job_description[:500] if job_description else 'Not provided'}
 
 CANDIDATE:
-{user_profile}
+{user_profile[:800]}
 
-Return ONLY JSON: {{"score": 75, "industry": "Retail", "reason": "brief reason"}}
-Score 0-100. Be strict. Industry must be exactly one of: {industry_options}"""
+Return ONLY JSON: {{"score": 75, "industry": "Retail"}}
+Score 0-100. Industry must be exactly one of: {industry_options}"""
 
-    try:
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": prompt}], "max_tokens": 120, "temperature": 0.1},
-            timeout=15
-        )
-        data = resp.json()
-        if "choices" not in data:
-            err = data.get("error", {})
-            msg = err.get("message", str(data)[:120]) if isinstance(err, dict) else str(err)[:120]
-            print(f"    ⚠️ Groq error ({resp.status_code}): {msg} — trying Haiku")
-            return score_job_with_haiku(job_title, job_company, job_description, user_profile)
-        content = data["choices"][0]["message"]["content"].strip()
-        score, industry = _extract_score_and_industry(content)
-        if score is None:
-            return score_job_with_haiku(job_title, job_company, job_description, user_profile)
-        return score, industry
-    except Exception as e:
-        print(f"    ⚠️ Groq failed: {e} — trying Haiku")
+    gemini_limiter.wait_if_needed()
+    
+    for attempt in range(3):
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={GEMINI_API_KEY}"
+            
+            payload = {
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": 120
+                }
+            }
+            
+            resp = requests.post(url, json=payload, timeout=15)
+            
+            if resp.status_code == 429:
+                wait = [2, 5, 10][attempt]
+                print(f"    ⚠️ Gemini rate limited, waiting {wait}s (attempt {attempt+1}/3)")
+                time.sleep(wait)
+                continue
+            
+            if resp.status_code != 200:
+                if attempt < 2:
+                    time.sleep(1)
+                    continue
+                print(f"    ⚠️ Gemini error {resp.status_code}: {resp.text[:200]}")
+                return 0, None
+            
+            data = resp.json()
+            content = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            score, industry = _extract_score_and_industry(content)
+            
+            if score is not None:
+                return score, industry
+                
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1)
+                continue
+            print(f"    ❌ Gemini failed: {e}")
+    
+    # Fallback to Claude if available
+    if ANTHROPIC_API_KEY:
         return score_job_with_haiku(job_title, job_company, job_description, user_profile)
-
+    return 0, None
 
 def score_job_with_haiku(job_title, job_company, job_description, user_profile):
+    if not ANTHROPIC_API_KEY:
+        return 0, None
+        
     industry_options = ", ".join(INDUSTRY_LIST)
     prompt = f"""Score this job match 0-100 and identify the industry. Return only JSON: {{"score": N, "industry": "Industry Name"}}
 Industry must be one of: {industry_options}
@@ -336,23 +401,18 @@ Candidate: {user_profile[:500]}"""
         resp = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 80, "messages": [{"role": "user", "content": prompt}]},
+            json={"model": "claude-3-haiku-20240307", "max_tokens": 80, "messages": [{"role": "user", "content": prompt}]},
             timeout=15
         )
         data = resp.json()
         if "content" not in data:
-            err = data.get("error", {})
-            msg = err.get("message", str(data)[:120]) if isinstance(err, dict) else str(err)[:120]
-            print(f"    ❌ Haiku error ({resp.status_code}): {msg}")
             return 0, None
         content = data["content"][0]["text"].strip()
         score, industry = _extract_score_and_industry(content)
         return (score if score is not None else 0), industry
     except Exception as e:
-        print(f"    ❌ Haiku also failed: {e}")
+        print(f"    ❌ Haiku failed: {e}")
         return 0, None
-
-
 
 def score_jobs_for_user(jobs, user):
     profile_parts = []
@@ -363,37 +423,36 @@ def score_jobs_for_user(jobs, user):
     if not profile_parts:
         return jobs
     user_profile = "\n".join(profile_parts)
-    MAX_SCORE_PER_REQUEST = 40
-    to_score = jobs[:MAX_SCORE_PER_REQUEST]
+    
+    # Limit to 20 jobs per batch to respect rate limits
+    MAX_JOBS_PER_RUN = 20
+    to_score = jobs[:MAX_JOBS_PER_RUN]
+    
     for i, job in enumerate(to_score):
-        result = score_job_with_groq(
+        score, industry = score_job_with_gemini(
             job.get("title", ""), job.get("company", ""),
             job.get("description", ""), user_profile
         )
-        # result is now (score, industry) tuple
-        if isinstance(result, tuple):
-            score, industry = result
-        else:
-            score, industry = result, None
         job["score"] = score if isinstance(score, int) else 0
-        # Write industry back to job_pool if not already set
+        
         if industry and job.get("id") and not job.get("industry"):
             try:
                 supabase.table("job_pool").update({"industry": industry}).eq("id", job["id"]).is_("industry", "null").execute()
                 job["industry"] = industry
             except Exception:
                 pass
-        # Small delay every 5 jobs to avoid hitting Groq TPM rate limit
-        if (i + 1) % 5 == 0:
-            time.sleep(1)
-    for job in jobs[MAX_SCORE_PER_REQUEST:]:
-        if not isinstance(job.get("score"), int):
-            job["score"] = 0
+        
+        # Delay every 3 jobs
+        if (i + 1) % 3 == 0:
+            time.sleep(2)
+    
+    # Unscored jobs get 0 (won't show as matches)
+    for job in jobs[MAX_JOBS_PER_RUN:]:
+        job["score"] = 0
+    
     return jobs
 
-
-
-# ── CV + Cover Letter ──────────────────────────────────────────────────────
+# ── CV + Cover Letter with Gemini ──────────────────────────────────────────
 def generate_cv_cover_letter(user, job):
     prompt = f"""You are an expert UAE career writer. Write a tailored cover letter and a tailored CV for this job application.
 
@@ -409,7 +468,7 @@ CANDIDATE CV:
 
 Write a professional, specific cover letter (3-4 short paragraphs) and a tailored CV that highlights the most relevant experience for THIS role.
 
-Format your response EXACTLY like this, using these exact delimiter lines:
+Format your response EXACTLY like this:
 
 ===COVER_LETTER===
 (the full cover letter here)
@@ -417,14 +476,14 @@ Format your response EXACTLY like this, using these exact delimiter lines:
 (the full tailored CV here)
 ===END==="""
 
-    def _call(model, max_tokens):
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens, "temperature": 0.4},
-            timeout=60
-        )
-        return resp.json()["choices"][0]["message"]["content"]
+    def _call(max_tokens):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.4, "maxOutputTokens": max_tokens}
+        }
+        resp = requests.post(url, json=payload, timeout=60)
+        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
 
     def _parse(text):
         cover, cv = "", ""
@@ -436,11 +495,9 @@ Format your response EXACTLY like this, using these exact delimiter lines:
         return cover, cv
 
     try:
-        content = _call("llama-3.3-70b-versatile", 3500)
+        content = _call(3500)
         cover, cv = _parse(content)
-        # Fallback: if delimiters missing, try to salvage by using the whole text as CV
         if not cover and not cv:
-            # try JSON as a last resort
             try:
                 cleaned = re.sub(r'```json|```', '', content).strip()
                 result = json.loads(cleaned)
@@ -449,13 +506,11 @@ Format your response EXACTLY like this, using these exact delimiter lines:
             except:
                 pass
         if not cover and not cv and content.strip():
-            # last-ditch: split roughly in half so the email isn't empty
             cover = content.strip()
         return cover, cv
     except Exception as e:
         print(f"❌ CV generation error: {e}")
         return "", ""
-
 
 # ── Pool logic ─────────────────────────────────────────────────────────────
 def is_fresh(last_scraped_str):
@@ -469,7 +524,6 @@ def is_fresh(last_scraped_str):
     except:
         return False
 
-
 def get_or_create_title(keyword):
     normalized = normalize_title(keyword)
     result = supabase.table("title_pool").select("*").eq("normalized", normalized).execute()
@@ -482,12 +536,10 @@ def get_or_create_title(keyword):
     }).execute()
     return insert.data[0], True
 
-
 def get_cached_jobs(keyword):
     normalized = normalize_title(keyword)
     result = supabase.table("job_pool").select("*").eq("search_keyword", normalized).order("posted_at", desc=True).execute()
     return result.data or []
-
 
 def save_jobs(keyword, items, logger=None):
     def log(msg):
@@ -529,6 +581,10 @@ def save_jobs(keyword, items, logger=None):
 
         description = (item.get("description") or item.get("snippet") or "")[:1500]
 
+        # Generate fingerprint for duplicate detection
+        fingerprint = f"{normalize_title(title)}|{company.lower()}|{item.get('location', 'UAE').lower()}"
+        fingerprint = re.sub(r'[^a-z0-9|]', '', fingerprint)[:200]
+
         try:
             supabase.table("job_pool").insert({
                 "title": title[:200],
@@ -541,6 +597,7 @@ def save_jobs(keyword, items, logger=None):
                 "search_keyword": normalized,
                 "salary": item.get("salary", ""),
                 "last_scraped": datetime.now(timezone.utc).isoformat(),
+                "fingerprint": fingerprint
             }).execute()
             existing_links.add(link)
             saved += 1
@@ -553,7 +610,6 @@ def save_jobs(keyword, items, logger=None):
 
     log(f"  💾 Saved {saved} new jobs for '{keyword}'")
     return saved
-
 
 # ── Main entry points ──────────────────────────────────────────────────────
 def search_jobs(keyword, user_gender=None, logger=None):
@@ -598,9 +654,7 @@ def search_jobs(keyword, user_gender=None, logger=None):
 
     return jobs
 
-
 def run_full_scrape():
-    """Run scraper for all titles in pool with full logging"""
     logger = RunLogger("full_scrape")
     logger.add("🚀 Full scrape started")
 
@@ -625,7 +679,6 @@ def run_full_scrape():
         logger.finish(success=False, error=e)
 
     return logger.log_id
-
 
 def search_and_score_for_user(user, logger=None):
     def log(msg):
@@ -658,7 +711,12 @@ def search_and_score_for_user(user, logger=None):
     if not all_jobs:
         return []
 
-    log(f"  🤖 Scoring {len(all_jobs)} unique jobs (deduplicated)...")
+    # Limit to 50 jobs per user to avoid rate limits
+    if len(all_jobs) > 50:
+        log(f"  ⚠️ Limiting from {len(all_jobs)} to 50 jobs for scoring")
+        all_jobs = all_jobs[:50]
+
+    log(f"  🤖 Scoring {len(all_jobs)} unique jobs...")
     scored_jobs = score_jobs_for_user(all_jobs, user)
 
     matched = []
@@ -682,16 +740,7 @@ def search_and_score_for_user(user, logger=None):
     log(f"  ✅ {len(matched)} jobs at 60%+ match")
     return matched
 
-
 def refresh_matches_for_user(user, logger=None):
-    """
-    Instant-refresh for a logged-in user:
-    1. Score jobs already in the pool for this user's titles that AREN'T scored yet (instant, cheap).
-    2. Return ALL the user's 60%+ matches from the DB immediately.
-    3. For titles with NO jobs in the pool yet (brand new), kick off a background scrape.
-    Returns: { "matches": [...], "pending_titles": [list of titles still being scraped] }
-    Only scores jobs not already scored for this user (no wasted AI calls on refresh).
-    """
     import threading as _threading
 
     def log(msg):
@@ -710,7 +759,6 @@ def refresh_matches_for_user(user, logger=None):
     title_ids = [t["title_id"] for t in title_links.data]
     titles = supabase.table("title_pool").select("keyword,normalized").in_("id", title_ids).execute()
 
-    # Which job_ids are already scored for this user (so we don't re-score)
     existing = supabase.table("user_job_matches").select("job_id").eq("user_id", user_id).execute()
     already_scored = {r["job_id"] for r in (existing.data or [])}
 
@@ -723,11 +771,9 @@ def refresh_matches_for_user(user, logger=None):
         pooled = supabase.table("job_pool").select("*").eq("search_keyword", normalized).execute().data or []
 
         if not pooled:
-            # Brand-new title with nothing in the pool yet — needs scraping
             pending_titles.append(t["keyword"])
             continue
 
-        # Gender filter + skip already-scored + dedup
         for j in pooled:
             if user_gender and user_gender != "prefer_not_to_say":
                 if is_gender_restricted(f"{j.get('title','')} {j.get('description','')}", user_gender):
@@ -740,9 +786,11 @@ def refresh_matches_for_user(user, logger=None):
             seen_links.add(link)
             jobs_to_score.append(j)
 
-    # Score only the new (un-scored) pooled jobs
     if jobs_to_score:
-        log(f"  🤖 Scoring {len(jobs_to_score)} new pooled jobs for user...")
+        if len(jobs_to_score) > 50:
+            log(f"  ⚠️ Limiting scoring to 50 jobs (from {len(jobs_to_score)})")
+            jobs_to_score = jobs_to_score[:50]
+        log(f"  🤖 Scoring {len(jobs_to_score)} new pooled jobs...")
         scored = score_jobs_for_user(jobs_to_score, user)
         for job in scored:
             score = job.get("score", 0) or 0
@@ -758,7 +806,6 @@ def refresh_matches_for_user(user, logger=None):
             except Exception as e:
                 log(f"  ⚠️ Match save error: {e}")
 
-    # Kick off background scrape for brand-new titles (non-blocking)
     if pending_titles:
         def _bg_scrape(titles_list, gender):
             for kw in titles_list:
@@ -769,7 +816,6 @@ def refresh_matches_for_user(user, logger=None):
         _threading.Thread(target=_bg_scrape, args=(pending_titles, user_gender), daemon=True).start()
         log(f"  🌐 Background scraping {len(pending_titles)} new titles: {pending_titles}")
 
-    # Return all the user's current 60%+ matches from DB
     match_rows = supabase.table("user_job_matches").select("job_id,score").eq("user_id", user_id).gte("score", 60).execute().data or []
     if not match_rows:
         return {"matches": [], "pending_titles": pending_titles}
@@ -782,7 +828,6 @@ def refresh_matches_for_user(user, logger=None):
     jobs.sort(key=lambda x: x.get("score", 0), reverse=True)
 
     return {"matches": jobs, "pending_titles": pending_titles}
-
 
 if __name__ == "__main__":
     run_full_scrape()
