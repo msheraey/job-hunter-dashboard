@@ -8,6 +8,7 @@ JobHunter Scraper v2 — Multi-user, on-demand pool architecture
 - Gender eligibility filter
 - Daily spend ceiling protection
 - Full run logging to Supabase scrape_logs table
+- Auto-archive jobs older than 30 days
 """
 
 import os
@@ -44,10 +45,11 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TTL_HOURS = 24
 MAX_DAILY_SCRAPES = 200
+JOB_MAX_DAYS = 30  # Jobs older than this are moved to old_jobs
 
 # ── Rate Limiter for Gemini ─────────────────────────────────────────────────
 class RateLimiter:
-    def __init__(self, requests_per_minute=20):
+    def __init__(self, requests_per_minute=15):
         self.requests_per_minute = requests_per_minute
         self.requests = deque()
         self.lock = threading.Lock()
@@ -99,6 +101,13 @@ MALE_ONLY_PATTERNS = [
     re.compile(r"\bonly\s+male(s)?\b", re.I),
 ]
 
+INDUSTRY_LIST = [
+    "Healthcare & Pharmacy", "Retail", "FMCG", "Logistics & Supply Chain",
+    "Technology", "Finance & Banking", "Hospitality & Tourism",
+    "Real Estate", "Automotive", "Education", "Construction & Engineering",
+    "Media & Marketing", "HR & Recruitment", "Other"
+]
+
 def is_junk(title):
     return any(p.search(title) for p in JUNK_PATTERNS)
 
@@ -125,6 +134,125 @@ def validate_title(title):
     if not re.search(r'[a-zA-Z]', t):
         return False
     return True
+
+def map_industry_variation(industry_text):
+    """Map industry variations to standard list"""
+    if not industry_text:
+        return "Other"
+    industry_lower = industry_text.lower()
+    
+    mapping = {
+        "health": "Healthcare & Pharmacy",
+        "healthcare": "Healthcare & Pharmacy",
+        "pharmacy": "Healthcare & Pharmacy",
+        "medical": "Healthcare & Pharmacy",
+        "retail": "Retail",
+        "fmcg": "FMCG",
+        "logistics": "Logistics & Supply Chain",
+        "supply chain": "Logistics & Supply Chain",
+        "tech": "Technology",
+        "it": "Technology",
+        "finance": "Finance & Banking",
+        "banking": "Finance & Banking",
+        "hospitality": "Hospitality & Tourism",
+        "tourism": "Hospitality & Tourism",
+        "real estate": "Real Estate",
+        "auto": "Automotive",
+        "automotive": "Automotive",
+        "education": "Education",
+        "construction": "Construction & Engineering",
+        "engineering": "Construction & Engineering",
+        "media": "Media & Marketing",
+        "marketing": "Media & Marketing",
+        "hr": "HR & Recruitment",
+        "recruitment": "HR & Recruitment"
+    }
+    
+    for key, value in mapping.items():
+        if key in industry_lower:
+            return value
+    
+    return "Other"
+
+def infer_industry_from_text(text):
+    """Infer industry from job title/description keywords"""
+    if not text:
+        return "Other"
+    text_lower = text.lower()
+    
+    keywords = {
+        "Healthcare & Pharmacy": ["nurse", "pharmacist", "doctor", "clinical", "hospital", "medical", "healthcare", "patient", "clinic", "dental", "radiology", "lab", "technician", "pharmacy"],
+        "Technology": ["developer", "engineer", "software", "data", "analyst", "it", "technical", "programmer", "devops", "cloud", "security", "network", "system", "database", "api", "frontend", "backend", "full stack"],
+        "Retail": ["sales", "retail", "store", "shop", "merchandise", "cashier", "customer service", "floor manager", "visual merchandising"],
+        "Finance & Banking": ["accountant", "finance", "bank", "audit", "tax", "treasury", "credit", "risk", "investment", "controller", "payable", "receivable"],
+        "Logistics & Supply Chain": ["logistics", "supply chain", "warehouse", "inventory", "procurement", "purchase", "shipping", "freight", "transport", "distribution", "driver"],
+        "Hospitality & Tourism": ["hotel", "restaurant", "catering", "tourism", "travel", "chef", "waiter", "bartender", "front desk", "resort", "guest service"],
+        "HR & Recruitment": ["hr", "recruitment", "talent", "people", "human resources", "hiring", "recruiter", "payroll", "employee", "onboarding"],
+        "Construction & Engineering": ["civil", "construction", "architect", "engineer", "site", "project manager", "quantity surveyor", "structural", "electrical", "mechanical"],
+        "Marketing & Media": ["marketing", "social media", "content", "seo", "digital", "brand", "advertising", "campaign", "communications", "pr"],
+        "Education": ["teacher", "professor", "instructor", "education", "school", "university", "trainer", "faculty", "academic", "curriculum"]
+    }
+    
+    for industry, words in keywords.items():
+        for word in words:
+            if word in text_lower:
+                return industry
+    
+    return "Other"
+
+# ── Job Freshness & Archival ────────────────────────────────────────────────
+def get_job_age_days(posted_at):
+    """Calculate age of job in days from posted_at date"""
+    if not posted_at:
+        return None
+    try:
+        if isinstance(posted_at, str):
+            posted_date = datetime.fromisoformat(posted_at.replace("Z", "+00:00"))
+        else:
+            posted_date = posted_at
+        if posted_date.tzinfo is None:
+            posted_date = posted_date.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - posted_date).days
+    except:
+        return None
+
+def move_old_jobs_to_archive(logger=None):
+    """Move jobs older than JOB_MAX_DAYS from job_pool to old_jobs table"""
+    def log(msg):
+        if logger:
+            logger.add(msg)
+        else:
+            print(msg)
+    
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=JOB_MAX_DAYS)
+    
+    old_jobs = supabase.table("job_pool").select("*").lt("posted_at", cutoff_date.isoformat()).execute().data or []
+    
+    if not old_jobs:
+        log(f"📦 No jobs older than {JOB_MAX_DAYS} days to archive")
+        return 0
+    
+    moved = 0
+    for job in old_jobs:
+        try:
+            age_days = get_job_age_days(job.get("posted_at"))
+            
+            supabase.table("old_jobs").insert({
+                **job,
+                "original_id": job["id"],
+                "age_days_at_move": age_days,
+                "moved_at": datetime.now(timezone.utc).isoformat()
+            }).execute()
+            
+            supabase.table("job_pool").delete().eq("id", job["id"]).execute()
+            supabase.table("user_job_matches").delete().eq("job_id", job["id"]).execute()
+            
+            moved += 1
+        except Exception as e:
+            log(f"  ⚠️ Error moving job {job.get('id')}: {e}")
+    
+    log(f"📦 Moved {moved} jobs to old_jobs (older than {JOB_MAX_DAYS} days)")
+    return moved
 
 # ── Logger class ───────────────────────────────────────────────────────────
 class RunLogger:
@@ -194,8 +322,8 @@ class RunLogger:
 def get_today_scrape_count():
     try:
         today = datetime.now(timezone.utc).date().isoformat()
-        result = supabase.table("title_pool").select("id").gte("last_scraped", today).execute()
-        return len(result.data or [])
+        result = supabase.table("title_pool").select("id", count="exact").gte("last_scraped", today).execute()
+        return result.count or 0
     except Exception as e:
         print(f"Error getting scrape count: {e}")
         return 0
@@ -295,31 +423,39 @@ def dataforseo_search(keyword, logger=None):
         return []
 
 # ── AI Scoring with Google Gemini 2.5 Flash ────────────────────────────────
-INDUSTRY_LIST = [
-    "Healthcare & Pharmacy", "Retail", "FMCG", "Logistics & Supply Chain",
-    "Technology", "Finance & Banking", "Hospitality & Tourism",
-    "Real Estate", "Automotive", "Education", "Construction & Engineering",
-    "Media & Marketing", "HR & Recruitment", "Other"
-]
-
 def _extract_score_and_industry(text):
+    """Extract score (int) and industry (str) from AI response with better parsing"""
     score = None
     industry = None
+    
     try:
         cleaned = re.sub(r'```json|```', '', text).strip()
-        m = re.search(r'\{[^}]*\}', cleaned, re.DOTALL)
-        if m:
-            data = json.loads(m.group(0))
-            val = data.get("score")
-            if val is not None:
-                score = max(0, min(100, int(val)))
-            industry = data.get("industry")
+        
+        json_match = re.search(r'\{[^{}]*\}', cleaned, re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group(0))
+                if "score" in data:
+                    val = data.get("score")
+                    if val is not None:
+                        score = max(0, min(100, int(val)))
+                if "industry" in data:
+                    industry = data.get("industry")
+                    if industry:
+                        industry = map_industry_variation(industry)
+            except json.JSONDecodeError:
+                pass
     except Exception:
         pass
+    
     if score is None:
-        m = re.search(r'\b(\d{1,3})\b', text)
-        if m:
-            score = max(0, min(100, int(m.group(1))))
+        number_match = re.search(r'\b([1-9]?\d|100)\b', text)
+        if number_match:
+            score = max(0, min(100, int(number_match.group(1))))
+    
+    if industry is None and text:
+        industry = infer_industry_from_text(text)
+    
     return score, industry
 
 def score_job_with_gemini(job_title, job_company, job_description, user_profile):
@@ -381,7 +517,6 @@ Score 0-100. Industry must be exactly one of: {industry_options}"""
                 continue
             print(f"    ❌ Gemini failed: {e}")
     
-    # Fallback to Claude if available
     if ANTHROPIC_API_KEY:
         return score_job_with_haiku(job_title, job_company, job_description, user_profile)
     return 0, None
@@ -424,7 +559,6 @@ def score_jobs_for_user(jobs, user):
         return jobs
     user_profile = "\n".join(profile_parts)
     
-    # Limit to 20 jobs per batch to respect rate limits
     MAX_JOBS_PER_RUN = 20
     to_score = jobs[:MAX_JOBS_PER_RUN]
     
@@ -442,11 +576,9 @@ def score_jobs_for_user(jobs, user):
             except Exception:
                 pass
         
-        # Delay every 3 jobs
         if (i + 1) % 3 == 0:
             time.sleep(2)
     
-    # Unscored jobs get 0 (won't show as matches)
     for job in jobs[MAX_JOBS_PER_RUN:]:
         job["score"] = 0
     
@@ -581,7 +713,6 @@ def save_jobs(keyword, items, logger=None):
 
         description = (item.get("description") or item.get("snippet") or "")[:1500]
 
-        # Generate fingerprint for duplicate detection
         fingerprint = f"{normalize_title(title)}|{company.lower()}|{item.get('location', 'UAE').lower()}"
         fingerprint = re.sub(r'[^a-z0-9|]', '', fingerprint)[:200]
 
@@ -643,6 +774,31 @@ def search_jobs(keyword, user_gender=None, logger=None):
                 logger.total_saved += saved
         jobs = get_cached_jobs(keyword)
 
+    # Filter out jobs older than 30 days
+    if jobs:
+        original_count = len(jobs)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=JOB_MAX_DAYS)
+        filtered_jobs = []
+        for j in jobs:
+            posted = j.get("posted_at")
+            if posted:
+                try:
+                    if isinstance(posted, str):
+                        posted_date = datetime.fromisoformat(posted.replace("Z", "+00:00"))
+                    else:
+                        posted_date = posted
+                    if posted_date.tzinfo is None:
+                        posted_date = posted_date.replace(tzinfo=timezone.utc)
+                    if posted_date >= cutoff:
+                        filtered_jobs.append(j)
+                except:
+                    filtered_jobs.append(j)
+            else:
+                filtered_jobs.append(j)
+        jobs = filtered_jobs
+        if original_count != len(jobs):
+            log(f"  🧹 Filtered out {original_count - len(jobs)} jobs older than {JOB_MAX_DAYS} days")
+
     if user_gender and user_gender != "prefer_not_to_say":
         before = len(jobs)
         jobs = [j for j in jobs if not is_gender_restricted(
@@ -659,6 +815,11 @@ def run_full_scrape():
     logger.add("🚀 Full scrape started")
 
     try:
+        logger.add(f"📦 Archiving jobs older than {JOB_MAX_DAYS} days...")
+        moved = move_old_jobs_to_archive(logger)
+        if moved > 0:
+            logger.add(f"  ✅ Moved {moved} jobs to old_jobs")
+        
         titles = supabase.table("title_pool").select("*").execute().data or []
         if not titles:
             logger.add("ℹ️ No titles in pool")
@@ -700,18 +861,26 @@ def search_and_score_for_user(user, logger=None):
 
     all_jobs = []
     seen_links = set()
+    seen_fingerprints = set()
+
     for t in (titles.data or []):
         jobs = search_jobs(t["keyword"], user_gender=user_gender, logger=logger)
         for j in jobs:
             link = j.get("link", "")
-            if link and link not in seen_links:
+            fingerprint = j.get("fingerprint", "")
+            
+            if (link and link in seen_links) or (fingerprint and fingerprint in seen_fingerprints):
+                continue
+            
+            if link:
                 seen_links.add(link)
-                all_jobs.append(j)
+            if fingerprint:
+                seen_fingerprints.add(fingerprint)
+            all_jobs.append(j)
 
     if not all_jobs:
         return []
 
-    # Limit to 50 jobs per user to avoid rate limits
     if len(all_jobs) > 50:
         log(f"  ⚠️ Limiting from {len(all_jobs)} to 50 jobs for scoring")
         all_jobs = all_jobs[:50]
@@ -765,6 +934,7 @@ def refresh_matches_for_user(user, logger=None):
     pending_titles = []
     jobs_to_score = []
     seen_links = set()
+    seen_fingerprints = set()
 
     for t in (titles.data or []):
         normalized = t["normalized"]
@@ -781,9 +951,15 @@ def refresh_matches_for_user(user, logger=None):
             if j["id"] in already_scored:
                 continue
             link = j.get("link", "")
-            if link and link in seen_links:
+            fingerprint = j.get("fingerprint", "")
+            
+            if (link and link in seen_links) or (fingerprint and fingerprint in seen_fingerprints):
                 continue
-            seen_links.add(link)
+                
+            if link:
+                seen_links.add(link)
+            if fingerprint:
+                seen_fingerprints.add(fingerprint)
             jobs_to_score.append(j)
 
     if jobs_to_score:
