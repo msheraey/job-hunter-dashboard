@@ -22,92 +22,6 @@ def update_user_last_active(user_id):
     except:
         pass
 
-def get_analytics_data():
-    """Fetch all analytics data from existing tables"""
-    
-    # Overview stats
-    total_jobs = supabase.table("job_pool").select("id", count="exact").execute().count or 0
-    new_jobs_24h = supabase.table("job_pool").select("id", count="exact").gt("created_at", (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()).execute().count or 0
-    active_users = supabase.table("users").select("id", count="exact").eq("is_active", True).execute().count or 0
-    total_users = supabase.table("users").select("id", count="exact").execute().count or 0
-    scrapes_today = supabase.table("title_pool").select("id", count="exact").gte("last_scraped", datetime.now(timezone.utc).date().isoformat()).execute().count or 0
-    daily_limit = 200
-    
-    # Match stats
-    avg_match_score = supabase.table("user_job_matches").select("score").execute().data or []
-    avg_score = round(sum(m.get("score", 0) for m in avg_match_score) / len(avg_match_score)) if avg_match_score else 0
-    total_matches = len(avg_match_score)
-    high_matches = len([m for m in avg_match_score if m.get("score", 0) >= 80])
-    
-    # Jobs over time (last 30 days)
-    jobs_over_time = []
-    for i in range(30):
-        date = (datetime.now(timezone.utc) - timedelta(days=i)).date().isoformat()
-        count = supabase.table("job_pool").select("id", count="exact").gte("created_at", date).lt("created_at", (datetime.fromisoformat(date) + timedelta(days=1)).isoformat()).execute().count or 0
-        jobs_over_time.append({"date": date, "count": count})
-    
-    # Industry distribution
-    industries = supabase.table("job_pool").select("industry").execute().data or []
-    industry_counts = {}
-    for j in industries:
-        ind = j.get("industry") or "Unknown"
-        industry_counts[ind] = industry_counts.get(ind, 0) + 1
-    industry_distribution = [{"name": k, "count": v} for k, v in sorted(industry_counts.items(), key=lambda x: -x[1])[:10]]
-    
-    # Match score distribution
-    score_ranges = {"0-20": 0, "21-40": 0, "41-60": 0, "61-80": 0, "81-100": 0}
-    for m in avg_match_score:
-        score = m.get("score", 0)
-        if score <= 20: score_ranges["0-20"] += 1
-        elif score <= 40: score_ranges["21-40"] += 1
-        elif score <= 60: score_ranges["41-60"] += 1
-        elif score <= 80: score_ranges["61-80"] += 1
-        else: score_ranges["81-100"] += 1
-    
-    # Users over time
-    users_over_time = []
-    for i in range(30):
-        date = (datetime.now(timezone.utc) - timedelta(days=i)).date().isoformat()
-        count = supabase.table("users").select("id", count="exact").gte("created_at", date).lt("created_at", (datetime.fromisoformat(date) + timedelta(days=1)).isoformat()).execute().count or 0
-        users_over_time.append({"date": date, "count": count})
-    
-    # Gender distribution
-    genders = supabase.table("users").select("gender").execute().data or []
-    gender_counts = {"male": 0, "female": 0, "prefer_not_to_say": 0}
-    for u in genders:
-        g = u.get("gender") or "prefer_not_to_say"
-        gender_counts[g] = gender_counts.get(g, 0) + 1
-    
-    # CV upload rate
-    cv_uploaded = supabase.table("users").select("id", count="exact").not_.is_("cv_text", "null").execute().count or 0
-    cv_rate = round(cv_uploaded / total_users * 100) if total_users > 0 else 0
-    
-    # Last scrape status
-    last_scrape = supabase.table("scrape_logs").select("started_at,status").order("started_at", desc=True).limit(1).execute().data
-    last_scrape_status = last_scrape[0] if last_scrape else None
-    
-    return {
-        "overview": {
-            "total_jobs": total_jobs,
-            "new_jobs_24h": new_jobs_24h,
-            "active_users": active_users,
-            "total_users": total_users,
-            "scrapes_today": scrapes_today,
-            "daily_limit": daily_limit,
-            "scrapes_remaining": daily_limit - scrapes_today,
-            "avg_match_score": avg_score,
-            "total_matches": total_matches,
-            "high_matches": high_matches,
-            "cv_upload_rate": cv_rate,
-            "last_scrape_status": last_scrape_status
-        },
-        "jobs_over_time": jobs_over_time,
-        "industry_distribution": industry_distribution,
-        "score_distribution": score_ranges,
-        "users_over_time": users_over_time,
-        "gender_distribution": gender_counts
-    }
-
 # ============================================================================
 # API Routes
 # ============================================================================
@@ -119,307 +33,6 @@ def dashboard():
 @app.route('/health')
 def health():
     return jsonify({"status": "ok"})
-
-@app.route('/api/analytics')
-def api_analytics():
-    try:
-        return jsonify(get_analytics_data())
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/credit-status')
-def api_credit_status():
-    """Returns credit/balance info and dashboard links for all services"""
-    
-    credits = {
-        "dataforseo": {
-            "name": "DataForSEO",
-            "has_api": False,
-            "link": "https://app.dataforseo.com/billing/balance",
-            "message": "Check dashboard for balance",
-            "status": "unknown",
-            "icon": "💰"
-        },
-        "gemini": {
-            "name": "Google Gemini",
-            "has_api": False,
-            "link": "https://console.cloud.google.com/apis/credentials",
-            "message": "Check Google Cloud Console → Billing",
-            "status": "unknown",
-            "icon": "🤖"
-        },
-        "anthropic": {
-            "name": "Anthropic (Claude)",
-            "has_api": False,
-            "link": "https://console.anthropic.com/settings/billing",
-            "message": "Check dashboard for credits",
-            "status": "unknown",
-            "icon": "🧠"
-        },
-        "resend": {
-            "name": "Resend (Email)",
-            "has_api": False,
-            "link": "https://resend.com/billing",
-            "message": "Check dashboard for email credits",
-            "status": "unknown",
-            "icon": "📧"
-        },
-        "serper": {
-            "name": "Serper.dev",
-            "has_api": False,
-            "link": "https://serper.dev/usage",
-            "message": "Check dashboard for API credits",
-            "status": "unknown",
-            "icon": "🔍"
-        },
-        "supabase": {
-            "name": "Supabase",
-            "has_api": False,
-            "link": "https://supabase.com/dashboard/project/_/settings/billing",
-            "message": "Check dashboard for usage",
-            "status": "unknown",
-            "icon": "🗄️"
-        },
-        "railway": {
-            "name": "Railway",
-            "has_api": False,
-            "link": "https://railway.app/account/billing",
-            "message": "Check dashboard for credits",
-            "status": "unknown",
-            "icon": "🚂"
-        },
-        "lovable": {
-            "name": "Lovable (Frontend)",
-            "has_api": False,
-            "link": "https://lovable.dev/settings/billing",
-            "message": "Check dashboard for subscription",
-            "status": "unknown",
-            "icon": "💜"
-        }
-    }
-    
-    import requests
-    
-    # DataForSEO
-    try:
-        resp = requests.post(
-            "https://api.dataforseo.com/v3/serp/google/jobs/task_post",
-            auth=(os.environ.get("DATAFORSEO_LOGIN"), os.environ.get("DATAFORSEO_PASSWORD")),
-            json=[{"keyword": "test", "location_name": "United Arab Emirates"}],
-            timeout=10
-        )
-        if resp.status_code == 200:
-            credits["dataforseo"]["status"] = "healthy"
-        elif resp.status_code == 402:
-            credits["dataforseo"]["status"] = "error"
-            credits["dataforseo"]["message"] = "⚠️ Payment Required - Check balance"
-        else:
-            credits["dataforseo"]["status"] = "degraded"
-    except:
-        credits["dataforseo"]["status"] = "error"
-    
-    # Gemini
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    if gemini_key:
-        try:
-            resp = requests.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}", timeout=10)
-            if resp.status_code == 200:
-                credits["gemini"]["status"] = "healthy"
-            elif resp.status_code == 403:
-                credits["gemini"]["status"] = "error"
-                credits["gemini"]["message"] = "Invalid or expired API key"
-            else:
-                credits["gemini"]["status"] = "degraded"
-        except:
-            credits["gemini"]["status"] = "error"
-    else:
-        credits["gemini"]["status"] = "missing"
-    
-    # Anthropic
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-    if anthropic_key:
-        try:
-            resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": anthropic_key, "anthropic-version": "2023-06-01"},
-                json={"model": "claude-3-haiku-20240307", "max_tokens": 1, "messages": [{"role": "user", "content": "Hi"}]},
-                timeout=10
-            )
-            if resp.status_code == 401:
-                credits["anthropic"]["status"] = "error"
-                credits["anthropic"]["message"] = "Invalid API key"
-            elif resp.status_code == 200 or resp.status_code == 400:
-                credits["anthropic"]["status"] = "healthy"
-            else:
-                credits["anthropic"]["status"] = "degraded"
-        except:
-            credits["anthropic"]["status"] = "error"
-    else:
-        credits["anthropic"]["status"] = "missing"
-    
-    # Resend
-    resend_key = os.environ.get("RESEND_API_KEY")
-    if resend_key:
-        credits["resend"]["status"] = "configured"
-    else:
-        credits["resend"]["status"] = "missing"
-    
-    # Serper
-    serper_key = os.environ.get("SERPER_API_KEY")
-    if serper_key:
-        credits["serper"]["status"] = "configured"
-    else:
-        credits["serper"]["status"] = "missing"
-    
-    # Supabase
-    try:
-        supabase.table("users").select("id").limit(1).execute()
-        credits["supabase"]["status"] = "healthy"
-    except:
-        credits["supabase"]["status"] = "error"
-    
-    # Railway status page
-    try:
-        resp = requests.get("https://status.railway.app/api/status", timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            all_good = all(c.get("status") == "operational" for c in data.get("components", []))
-            credits["railway"]["status"] = "healthy" if all_good else "degraded"
-            if not all_good:
-                down_services = [c.get("name") for c in data.get("components", []) if c.get("status") != "operational"]
-                credits["railway"]["message"] = f"Down: {', '.join(down_services)}"
-        else:
-            credits["railway"]["status"] = "unknown"
-    except:
-        credits["railway"]["status"] = "unknown"
-    
-    # Lovable frontend
-    try:
-        resp = requests.get("https://jobhunter.ae", timeout=5)
-        if resp.status_code == 200:
-            credits["lovable"]["status"] = "healthy"
-        else:
-            credits["lovable"]["status"] = "degraded"
-    except:
-        credits["lovable"]["status"] = "error"
-    
-    return jsonify(credits)
-
-@app.route('/api/seo-status')
-def api_seo_status():
-    """Check Google Analytics and SEO metrics"""
-    
-    import requests
-    from bs4 import BeautifulSoup
-    
-    seo = {
-        "google_analytics": {
-            "configured": False,
-            "tracking_id": None,
-            "status": "missing",
-            "setup_link": "https://analytics.google.com/",
-            "icon": "📊"
-        },
-        "google_search_console": {
-            "configured": False,
-            "status": "missing",
-            "setup_link": "https://search.google.com/search-console",
-            "icon": "🔎"
-        },
-        "sitemap": {
-            "exists": False,
-            "url": "https://jobhunter.ae/sitemap.xml",
-            "status": "unknown",
-            "icon": "🗺️"
-        },
-        "robots_txt": {
-            "exists": False,
-            "url": "https://jobhunter.ae/robots.txt",
-            "status": "unknown",
-            "icon": "🤖"
-        },
-        "meta_tags": {
-            "title": None,
-            "description": None,
-            "status": "unknown",
-            "icon": "📝"
-        },
-        "performance": {
-            "load_time_ms": None,
-            "status": "unknown",
-            "icon": "⚡"
-        }
-    }
-    
-    # Check sitemap
-    try:
-        resp = requests.get("https://jobhunter.ae/sitemap.xml", timeout=5)
-        if resp.status_code == 200:
-            seo["sitemap"]["exists"] = True
-            seo["sitemap"]["status"] = "healthy"
-        else:
-            seo["sitemap"]["status"] = "missing"
-    except:
-        seo["sitemap"]["status"] = "unreachable"
-    
-    # Check robots.txt
-    try:
-        resp = requests.get("https://jobhunter.ae/robots.txt", timeout=5)
-        if resp.status_code == 200:
-            seo["robots_txt"]["exists"] = True
-            seo["robots_txt"]["status"] = "healthy"
-            if "sitemap" in resp.text.lower():
-                seo["robots_txt"]["sitemap_referenced"] = True
-        else:
-            seo["robots_txt"]["status"] = "missing"
-    except:
-        seo["robots_txt"]["status"] = "unreachable"
-    
-    # Check meta tags and performance
-    try:
-        start_time = datetime.now()
-        resp = requests.get("https://jobhunter.ae", timeout=10)
-        load_time = (datetime.now() - start_time).total_seconds() * 1000
-        
-        seo["performance"]["load_time_ms"] = round(load_time, 0)
-        if load_time < 1000:
-            seo["performance"]["status"] = "excellent"
-        elif load_time < 2000:
-            seo["performance"]["status"] = "good"
-        elif load_time < 4000:
-            seo["performance"]["status"] = "fair"
-        else:
-            seo["performance"]["status"] = "poor"
-        
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            title_tag = soup.find('title')
-            meta_desc = soup.find('meta', attrs={'name': 'description'})
-            seo["meta_tags"]["title"] = title_tag.text.strip() if title_tag else None
-            seo["meta_tags"]["description"] = meta_desc.get('content', '').strip() if meta_desc else None
-            
-            # Check for GA tracking
-            ga_present = 'gtag' in resp.text or 'google-analytics' in resp.text or 'G-' in resp.text
-            if ga_present:
-                seo["google_analytics"]["configured"] = True
-                seo["google_analytics"]["status"] = "healthy"
-                
-                # Try to extract GA ID
-                import re
-                ga_match = re.search(r'G-[A-Z0-9]+', resp.text)
-                if ga_match:
-                    seo["google_analytics"]["tracking_id"] = ga_match.group(0)
-            
-            if seo["meta_tags"]["title"] and seo["meta_tags"]["description"]:
-                seo["meta_tags"]["status"] = "healthy"
-            elif seo["meta_tags"]["title"]:
-                seo["meta_tags"]["status"] = "warning"
-            else:
-                seo["meta_tags"]["status"] = "error"
-    except:
-        seo["meta_tags"]["status"] = "unreachable"
-    
-    return jsonify(seo)
 
 @app.route('/api/logs')
 def api_logs():
@@ -604,6 +217,43 @@ def api_delete_user():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.route('/api/old-jobs')
+def api_old_jobs():
+    try:
+        from scraper_v2 import get_old_jobs
+        limit = request.args.get('limit', 100, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        
+        result = supabase.table("old_jobs").select("*").order("moved_at", desc=True).limit(limit).offset(offset).execute()
+        jobs = result.data or []
+        return jsonify({"jobs": jobs, "total": len(jobs)})
+    except Exception as e:
+        return jsonify({"error": str(e), "jobs": []})
+
+@app.route('/api/restore-job', methods=['POST'])
+def api_restore_job():
+    data = request.json or {}
+    job_id = data.get("job_id")
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+    
+    try:
+        old = supabase.table("old_jobs").select("*").eq("id", job_id).execute().data
+        if not old:
+            return jsonify({"success": False, "message": "Job not found in old_jobs"})
+        
+        job = old[0]
+        job.pop("moved_at", None)
+        job.pop("original_id", None)
+        job.pop("age_days_at_move", None)
+        
+        supabase.table("job_pool").insert(job).execute()
+        supabase.table("old_jobs").delete().eq("id", job_id).execute()
+        
+        return jsonify({"success": True, "message": "Job restored"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
 # ============================================================================
 # HTML Dashboard Builder
 # ============================================================================
@@ -631,7 +281,7 @@ def build_dashboard_html():
             feedback = []
         today = datetime.now(timezone.utc).date().isoformat()
     except Exception as e:
-        return "<h1>DB Error: " + str(e) + "</h1>"
+        return f"<h1>DB Error: {str(e)}</h1>"
     
     # Build jobs rows
     rows = []
@@ -643,7 +293,7 @@ def build_dashboard_html():
             sbg = "#fef9c3;color:#854d0e"
         else:
             sbg = "#fee2e2;color:#991b1b"
-        score_html = '<span style="background:' + sbg + ';padding:2px 8px;border-radius:20px;font-size:12px;font-weight:600">' + str(score) + '%</span>' if score else '<span style="color:#94a3b8">&mdash;</span>'
+        score_html = f'<span style="background:{sbg};padding:2px 8px;border-radius:20px;font-size:12px;font-weight:600">{score}%</span>' if score else '<span style="color:#94a3b8">&mdash;</span>'
         posted = (j.get("posted_at") or "")[:10] or "&mdash;"
         link = j.get("link") or "#"
         rows.append(f"""<tr>
@@ -709,4 +359,314 @@ def build_dashboard_html():
         started = (l.get("started_at") or "")[:16].replace("T", " ")
         finished = (l.get("finished_at") or "&mdash;")[:16].replace("T", " ")
         view_btn = f'<button onclick=\'showLog("{lid}")\' style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">View</button>'
-        rows
+        rows.append(f"<tr><td>{i}</td><td>{started}</td><td>{finished}</td><td>{badge}</td><td>{l.get('total_scraped') or 0}</td><td>{l.get('total_saved') or 0}</td><td>{view_btn}</td></tr>")
+    logs_html = "".join(rows) or '<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">No logs yet</td></tr>'
+    
+    # Build feedback rows
+    rows = []
+    for i, f in enumerate(feedback, 1):
+        rating = f.get("rating") or 0
+        stars = "★" * int(rating) + "☆" * (5 - int(rating)) if rating else "—"
+        when = (f.get("created_at") or "")[:16].replace("T", " ")
+        comment = (f.get("comment") or "").replace("<", "&lt;").replace(">", "&gt;") or "—"
+        rows.append(f"<tr><td>{i}</td><td style=\"white-space:nowrap\">{when}</td><td style=\"color:#f59e0b\">{stars}</td><td>{comment}</td><td style=\"font-size:12px;color:#64748b\">{f.get('email') or 'anonymous'}</td></tr>")
+    feedback_html = "".join(rows) or '<tr><td colspan="5" style="text-align:center;padding:32px;color:#94a3b8">No feedback yet</td></tr>'
+    
+    scraped_today = len([t for t in titles if (t.get("last_scraped") or "")[:10] == today])
+    
+    page = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>JobHunter Admin</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b}}
+.hdr{{background:linear-gradient(135deg,#1e40af,#3b82f6);color:white;padding:20px 32px;display:flex;justify-content:space-between;align-items:center}}
+.hdr h1{{font-size:22px;font-weight:700}}
+.wrap{{max-width:1400px;margin:0 auto;padding:24px 16px}}
+.stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;margin-bottom:24px}}
+.stat{{background:white;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
+.stat .v{{font-size:32px;font-weight:700;color:#1e40af}}
+.stat .l{{font-size:13px;color:#64748b;margin-top:4px}}
+.card{{background:white;border-radius:12px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:20px}}
+.tabs{{display:flex;gap:4px;margin-bottom:20px;border-bottom:2px solid #e2e8f0;flex-wrap:wrap}}
+.tab{{padding:10px 20px;cursor:pointer;font-size:14px;font-weight:500;color:#64748b;border-bottom:2px solid transparent;margin-bottom:-2px}}
+.tab.on{{color:#2563eb;border-bottom-color:#2563eb}}
+.pane{{display:none}}.pane.on{{display:block}}
+table{{width:100%;border-collapse:collapse}}
+th{{text-align:left;font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;padding:8px 12px;border-bottom:2px solid #f1f5f9}}
+td{{padding:10px 12px;border-bottom:1px solid #f8fafc;font-size:14px}}
+tr:hover td{{background:#f8fafc}}
+.log-box{{background:#0f172a;color:#94a3b8;border-radius:8px;padding:16px;font-family:monospace;font-size:12px;max-height:400px;overflow-y:auto;margin-top:12px;white-space:pre-wrap;line-height:1.6}}
+.sp{{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:6px}}
+@keyframes spin{{to{{transform:rotate(360deg)}}}}
+input,select{{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px}}
+#msg{{margin-top:16px;font-size:14px;color:#64748b}}
+</style></head>
+<body>
+<div class="hdr">
+  <div><h1>JobHunter Admin</h1><small style="opacity:.8;font-size:13px">Backend dashboard</small></div>
+  <div style="text-align:right;font-size:13px;opacity:.9">{len(jobs)} jobs · {len(titles)} titles · {len(users)} users</div>
+</div>
+<div class="wrap">
+  <div class="tabs">
+    <div class="tab on" onclick="show('jobs',this)">Job Pool</div>
+    <div class="tab" onclick="show('titles',this)">Titles</div>
+    <div class="tab" onclick="show('users',this)">Users</div>
+    <div class="tab" onclick="show('scraper',this)">Run Scraper</div>
+    <div class="tab" onclick="show('logs',this)">Logs</div>
+    <div class="tab" onclick="show('feedback',this)">Feedback</div>
+    <div class="tab" onclick="show('oldjobs',this)">Old Jobs</div>
+  </div>
+  
+  <!-- Job Pool Tab -->
+  <div id="jobs" class="pane on card">
+    <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+      <input id="qs" placeholder="Search..." oninput="filter()" style="flex:1;min-width:200px">
+      <select id="qp" onchange="filter()"><option value="">All Platforms</option><option>LinkedIn</option><option>Indeed</option><option>Bayt.com</option><option>Naukrigulf</option><option>GulfTalent.com</option></select>
+    </div>
+    <table id="jt"><thead><tr><th>#</th><th>Title</th><th>Company</th><th>Location</th><th>Platform</th><th>Posted</th><th>Salary</th><th>Score</th><th></th></tr></thead>
+    <tbody>{jobs_html}</tbody></table>
+  </div>
+  
+  <!-- Titles Tab -->
+  <div id="titles" class="pane card">
+    <table><thead><tr><th>#</th><th>Keyword</th><th>Last Scraped</th><th>Requests</th><th>Status</th><th></th></tr></thead>
+    <tbody>{titles_html}</tbody></table>
+  </div>
+  
+  <!-- Users Tab -->
+  <div id="users" class="pane card">
+    <table><thead><tr><th>#</th><th>Name</th><th>Email</th><th>Gender</th><th>CV</th><th>Joined</th><th>Last Active</th><th>Active</th><th></th></tr></thead>
+    <tbody>{users_html}</tbody></table>
+  </div>
+  
+  <!-- Scraper Tab -->
+  <div id="scraper" class="pane card">
+    <h2 style="margin-bottom:16px">Run Scraper</h2>
+    <p style="color:#64748b;font-size:14px;margin-bottom:20px">Scrapes all active titles. Respects 24h cache. Daily ceiling: 200 scrapes.</p>
+    <div style="display:flex;gap:12px;flex-wrap:wrap">
+      <button id="sb" onclick="runScraper()" style="background:#2563eb;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">▶ Run Scraper Now</button>
+      <button id="eb" onclick="runEmail()" style="background:#059669;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">Score + Email Users</button>
+    </div>
+    <div id="msg"></div>
+  </div>
+  
+  <!-- Logs Tab -->
+  <div id="logs" class="pane card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h2 style="margin:0">Scrape Logs</h2>
+      <button onclick="loadLogs()" style="background:#f1f5f9;color:#64748b;padding:6px 12px;border:none;border-radius:8px;cursor:pointer;font-size:13px">Refresh</button>
+    </div>
+    <table><thead><tr><th>#</th><th>Started</th><th>Finished</th><th>Status</th><th>Scraped</th><th>Saved</th><th></th></tr></thead>
+    <tbody id="lb">{logs_html}</tbody></table>
+    <div id="ld" style="display:none;margin-top:16px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+        <strong>Log Detail</strong>
+        <button onclick="document.getElementById('ld').style.display='none'" style="background:#f1f5f9;border:none;padding:4px 10px;border-radius:6px;cursor:pointer">Close</button>
+      </div>
+      <div id="lc" class="log-box">Loading...</div>
+    </div>
+  </div>
+  
+  <!-- Feedback Tab -->
+  <div id="feedback" class="pane card">
+    <h2 style="margin-bottom:16px">User Feedback</h2>
+    <table><thead><tr><th>#</th><th>Date</th><th>Rating</th><th>Comment</th><th>From</th></tr></thead>
+    <tbody>{feedback_html}</tbody></table>
+  </div>
+  
+  <!-- Old Jobs Tab -->
+  <div id="oldjobs" class="pane card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h2 style="margin:0">Archived Jobs (&gt;30 days old)</h2>
+      <button onclick="loadOldJobs()" style="background:#f1f5f9;color:#64748b;padding:6px 12px;border:none;border-radius:8px;cursor:pointer;font-size:13px">Refresh</button>
+    </div>
+    <div style="margin-bottom:16px;padding:12px;background:#fef3c7;border-radius:8px;color:#92400e">
+      ⚠️ Jobs older than 30 days are automatically moved here. They no longer appear in user matches but can be restored if needed.
+    </div>
+    <div style="overflow-x:auto">
+      <table style="width:100%">
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>Company</th>
+            <th>Location</th>
+            <th>Age at move</th>
+            <th>Moved on</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="old-jobs-body">
+          <tr><td colspan="6" style="text-align:center">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+function show(id,el){{
+  document.querySelectorAll('.pane').forEach(p => p.className = 'pane');
+  document.querySelectorAll('.tab').forEach(t => t.className = 'tab');
+  document.getElementById(id).className = 'pane on';
+  el.className = 'tab on';
+  if(id === 'logs') loadLogs();
+  if(id === 'oldjobs') loadOldJobs();
+}}
+
+function filter(){{
+  var q = document.getElementById('qs').value.toLowerCase();
+  var p = document.getElementById('qp').value.toLowerCase();
+  document.querySelectorAll('#jt tbody tr').forEach(r => {{
+    var t = r.textContent.toLowerCase();
+    r.style.display = (!q || t.indexOf(q) > -1) && (!p || t.indexOf(p) > -1) ? '' : 'none';
+  }});
+}}
+
+function setMsg(h){{
+  var e = document.getElementById('msg');
+  e.style.display = 'block';
+  e.innerHTML = h;
+}}
+
+function runScraper(){{
+  var b = document.getElementById('sb');
+  b.disabled = true;
+  b.innerHTML = '<span class="sp"></span>Starting...';
+  setMsg('Scraper running in background...');
+  fetch('/api/run-scraper',{{method:'POST'}})
+    .then(r => r.json())
+    .then(() => {{
+      b.disabled = false;
+      b.innerHTML = '▶ Run Scraper Now';
+      setMsg('Started! Check Logs tab in 30 seconds.');
+    }})
+    .catch(e => {{
+      b.disabled = false;
+      b.innerHTML = '▶ Run Scraper Now';
+      setMsg('Error: ' + e);
+    }});
+}}
+
+function runEmail(){{
+  var b = document.getElementById('eb');
+  b.disabled = true;
+  b.innerHTML = '<span class="sp"></span>Processing...';
+  setMsg('Scoring and emailing...');
+  fetch('/api/score-and-email',{{method:'POST'}})
+    .then(r => r.json())
+    .then(d => {{
+      b.disabled = false;
+      b.innerHTML = 'Score + Email Users';
+      var h = '';
+      for(var i=0;i<d.log.length;i++) h += '<div>' + d.log[i] + '</div>';
+      setMsg(h);
+    }})
+    .catch(e => {{
+      b.disabled = false;
+      b.innerHTML = 'Score + Email Users';
+      setMsg('Error: ' + e);
+    }});
+}}
+
+function loadLogs(){{
+  fetch('/api/logs').then(r => r.json()).then(d => {{
+    var b = document.getElementById('lb');
+    if(!d.logs||!d.logs.length){{
+      b.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:32px;color:#94a3b8">No logs yet</td></tr>';
+      return;
+    }}
+    var h = '';
+    for(var i=0;i<d.logs.length;i++){{
+      var l = d.logs[i];
+      var s = l.status||'';
+      var bg = s==='success'?'#dcfce7;color:#166534':s==='error'?'#fee2e2;color:#991b1b':'#dbeafe;color:#1d4ed8';
+      h += `<tr><td>${{i+1}}</td><td>${{(l.started_at||'').slice(0,16).replace('T',' ')}}</td><td>${{(l.finished_at||'').slice(0,16).replace('T',' ')}}</td>`;
+      h += `<td><span style="background:${{bg}};padding:2px 8px;border-radius:20px;font-size:12px">${{s}}</span></td>`;
+      h += `<td>${{l.total_scraped||0}}</td><td>${{l.total_saved||0}}</td>`;
+      h += `<td><button class="vlog" data-id="${{l.id}}" style="background:#2563eb;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">View</button></td></tr>`;
+    }}
+    b.innerHTML = h;
+    document.querySelectorAll('.vlog').forEach(btn => {{
+      btn.addEventListener('click', function(){{ showLog(this.getAttribute('data-id')); }});
+    }});
+  }});
+}}
+
+function showLog(id){{
+  var d = document.getElementById('ld');
+  var c = document.getElementById('lc');
+  d.style.display = 'block';
+  c.textContent = 'Loading...';
+  d.scrollIntoView({{behavior:'smooth'}});
+  fetch('/api/logs/'+id).then(r => r.json()).then(d => {{ c.textContent = d.log_text||'No content yet'; c.scrollTop = c.scrollHeight; }});
+}}
+
+function delTitle(id){{
+  if(!confirm('Delete this title from the pool? This cannot be undone.')) return;
+  fetch('/api/delete-title',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{id:id}})}})
+    .then(r => r.json())
+    .then(d => {{ if(d.ok){{ location.reload(); }}else{{ alert('Error: '+(d.error||'failed')); }} }})
+    .catch(e => {{ alert('Error: '+e); }});
+}}
+
+function delUser(id){{
+  if(!confirm('Delete this user and all their matches/titles links? This cannot be undone.')) return;
+  fetch('/api/delete-user',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{id:id}})}})
+    .then(r => r.json())
+    .then(d => {{ if(d.ok){{ location.reload(); }}else{{ alert('Error: '+(d.error||'failed')); }} }})
+    .catch(e => {{ alert('Error: '+e); }});
+}}
+
+function loadOldJobs(){{
+  fetch('/api/old-jobs?limit=100')
+    .then(r => r.json())
+    .then(data => {{
+      if(data.error){{
+        document.getElementById('old-jobs-body').innerHTML = `<tr><td colspan="6" style="text-align:center;color:red">Error: ${{data.error}}</td></tr>`;
+        return;
+      }}
+      if(!data.jobs || data.jobs.length === 0){{
+        document.getElementById('old-jobs-body').innerHTML = `<tr><td colspan="6" style="text-align:center">No archived jobs yet</td></tr>`;
+        return;
+      }}
+      var html = '';
+      for(var i=0;i<data.jobs.length;i++){{
+        var j = data.jobs[i];
+        html += `<tr>
+          <td>${{j.title || 'N/A'}}</td>
+          <td>${{j.company || 'N/A'}}</td>
+          <td>${{j.location || 'UAE'}}</td>
+          <td>${{j.age_days_at_move || '?'}} days</td>
+          <td>${{(j.moved_at || '').slice(0,10)}}</td>
+          <td><button onclick="restoreJob('${{j.id}}')" style="background:#10b981;color:white;border:none;padding:4px 10px;border-radius:6px;cursor:pointer">Restore</button></td>
+        </tr>`;
+      }}
+      document.getElementById('old-jobs-body').innerHTML = html;
+    }})
+    .catch(e => {{
+      document.getElementById('old-jobs-body').innerHTML = `<tr><td colspan="6" style="text-align:center;color:red">Error: ${{e}}</td></tr>`;
+    }});
+}}
+
+function restoreJob(jobId){{
+  if(!confirm('Restore this job to active pool? It will reappear in user matches.')) return;
+  fetch('/api/restore-job',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{job_id:jobId}})}})
+    .then(r => r.json())
+    .then(data => {{
+      if(data.success){{
+        alert('Job restored successfully');
+        loadOldJobs();
+      }}else{{
+        alert('Error: ' + data.message);
+      }}
+    }})
+    .catch(e => alert('Error: ' + e));
+}}
+</script>
+</body></html>"""
+    
+    return page
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
