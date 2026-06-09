@@ -433,14 +433,15 @@ def dataforseo_search(keyword, logger=None):
 
 # ── AI Scoring with Google Gemini 2.5 Flash ────────────────────────────────
 def _extract_score_and_industry(text):
-    """Extract score (int) and industry (str) from AI response with better parsing"""
+    """Extract score (int), industry (str), and reason (str) from AI response with better parsing"""
     score = None
     industry = None
+    reason = None
     
     try:
         cleaned = re.sub(r'```json|```', '', text).strip()
         
-        json_match = re.search(r'\{[^{}]*\}', cleaned, re.DOTALL)
+        json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
         if json_match:
             try:
                 data = json.loads(json_match.group(0))
@@ -452,6 +453,10 @@ def _extract_score_and_industry(text):
                     industry = data.get("industry")
                     if industry:
                         industry = map_industry_variation(industry)
+                if "reason" in data:
+                    reason = data.get("reason")
+                    if reason:
+                        reason = str(reason).strip()[:200]
             except json.JSONDecodeError:
                 pass
     except Exception:
@@ -465,7 +470,7 @@ def _extract_score_and_industry(text):
     if industry is None and text:
         industry = infer_industry_from_text(text)
     
-    return score, industry
+    return score, industry, reason
 
 def score_job_with_gemini(job_title, job_company, job_description, user_profile):
     industry_options = ", ".join(INDUSTRY_LIST)
@@ -479,7 +484,7 @@ Description: {job_description[:500] if job_description else 'Not provided'}
 CANDIDATE:
 {user_profile[:800]}
 
-Return ONLY JSON: {{"score": 75, "industry": "Retail"}}
+Return ONLY JSON: {{"score": 75, "industry": "Retail", "reason": "one short sentence under 15 words on why it matches"}}
 Score 0-100. Industry must be exactly one of: {industry_options}"""
 
     gemini_limiter.wait_if_needed()
@@ -494,7 +499,7 @@ Score 0-100. Industry must be exactly one of: {industry_options}"""
                 }],
                 "generationConfig": {
                     "temperature": 0.1,
-                    "maxOutputTokens": 120
+                    "maxOutputTokens": 150
                 }
             }
             
@@ -511,14 +516,14 @@ Score 0-100. Industry must be exactly one of: {industry_options}"""
                     time.sleep(1)
                     continue
                 print(f"    ⚠️ Gemini error {resp.status_code}: {resp.text[:200]}")
-                return 0, None
+                return 0, None, None
             
             data = resp.json()
             content = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            score, industry = _extract_score_and_industry(content)
+            score, industry, reason = _extract_score_and_industry(content)
             
             if score is not None:
-                return score, industry
+                return score, industry, reason
                 
         except Exception as e:
             if attempt < 2:
@@ -528,14 +533,14 @@ Score 0-100. Industry must be exactly one of: {industry_options}"""
     
     if ANTHROPIC_API_KEY:
         return score_job_with_haiku(job_title, job_company, job_description, user_profile)
-    return 0, None
+    return 0, None, None
 
 def score_job_with_haiku(job_title, job_company, job_description, user_profile):
     if not ANTHROPIC_API_KEY:
-        return 0, None
+        return 0, None, None
         
     industry_options = ", ".join(INDUSTRY_LIST)
-    prompt = f"""Score this job match 0-100 and identify the industry. Return only JSON: {{"score": N, "industry": "Industry Name"}}
+    prompt = f"""Score this job match 0-100 and identify the industry. Return only JSON: {{"score": N, "industry": "Industry Name", "reason": "short reason under 15 words"}}
 Industry must be one of: {industry_options}
 Job: {job_title} at {job_company}
 Description: {job_description[:300] if job_description else ""}
@@ -545,18 +550,18 @@ Candidate: {user_profile[:500]}"""
         resp = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": "claude-3-haiku-20240307", "max_tokens": 80, "messages": [{"role": "user", "content": prompt}]},
+            json={"model": "claude-3-haiku-20240307", "max_tokens": 120, "messages": [{"role": "user", "content": prompt}]},
             timeout=15
         )
         data = resp.json()
         if "content" not in data:
-            return 0, None
+            return 0, None, None
         content = data["content"][0]["text"].strip()
-        score, industry = _extract_score_and_industry(content)
-        return (score if score is not None else 0), industry
+        score, industry, reason = _extract_score_and_industry(content)
+        return (score if score is not None else 0), industry, reason
     except Exception as e:
         print(f"    ❌ Haiku failed: {e}")
-        return 0, None
+        return 0, None, None
 
 def score_jobs_for_user(jobs, user):
     profile_parts = []
@@ -572,11 +577,12 @@ def score_jobs_for_user(jobs, user):
     to_score = jobs[:MAX_JOBS_PER_RUN]
     
     for i, job in enumerate(to_score):
-        score, industry = score_job_with_gemini(
+        score, industry, reason = score_job_with_gemini(
             job.get("title", ""), job.get("company", ""),
             job.get("description", ""), user_profile
         )
         job["score"] = score if isinstance(score, int) else 0
+        job["match_reason"] = reason
         
         if industry and job.get("id") and not job.get("industry"):
             try:
@@ -907,6 +913,7 @@ def search_and_score_for_user(user, logger=None):
                 "user_id": user_id,
                 "job_id": job["id"],
                 "score": score,
+                "match_reason": job.get("match_reason"),
                 "emailed": score >= 60
             }, on_conflict="user_id,job_id").execute()
         except Exception as e:
@@ -986,6 +993,7 @@ def refresh_matches_for_user(user, logger=None):
                     "user_id": user_id,
                     "job_id": job["id"],
                     "score": score,
+                    "match_reason": job.get("match_reason"),
                     "emailed": False
                 }, on_conflict="user_id,job_id").execute()
             except Exception as e:
@@ -1001,15 +1009,24 @@ def refresh_matches_for_user(user, logger=None):
         _threading.Thread(target=_bg_scrape, args=(pending_titles, user_gender), daemon=True).start()
         log(f"  🌐 Background scraping {len(pending_titles)} new titles: {pending_titles}")
 
-    match_rows = supabase.table("user_job_matches").select("job_id,score").eq("user_id", user_id).gte("score", 60).execute().data or []
+    match_rows = supabase.table("user_job_matches").select("job_id,score,match_reason,status").eq("user_id", user_id).gte("score", 60).execute().data or []
     if not match_rows:
         return {"matches": [], "pending_titles": pending_titles}
 
-    job_ids = [m["job_id"] for m in match_rows]
-    score_map = {m["job_id"]: m["score"] for m in match_rows}
+    # Exclude skipped jobs from the main matches list
+    active_rows = [m for m in match_rows if m.get("status") != "skipped"]
+    if not active_rows:
+        return {"matches": [], "pending_titles": pending_titles}
+
+    job_ids = [m["job_id"] for m in active_rows]
+    score_map = {m["job_id"]: m["score"] for m in active_rows}
+    reason_map = {m["job_id"]: m.get("match_reason") for m in active_rows}
+    status_map = {m["job_id"]: m.get("status", "new") for m in active_rows}
     jobs = supabase.table("job_pool").select("*").in_("id", job_ids).execute().data or []
     for j in jobs:
         j["score"] = score_map.get(j["id"], 0)
+        j["match_reason"] = reason_map.get(j["id"])
+        j["status"] = status_map.get(j["id"], "new")
     jobs.sort(key=lambda x: x.get("score", 0), reverse=True)
 
     return {"matches": jobs, "pending_titles": pending_titles}
