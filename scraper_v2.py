@@ -232,21 +232,30 @@ def move_old_jobs_to_archive(logger=None):
         log(f"📦 No jobs older than {JOB_MAX_DAYS} days to archive")
         return 0
     
+    # Only these columns exist in old_jobs — strip anything else (e.g. freshness_score)
+    # to avoid PGRST204 "column not found" errors.
+    ALLOWED_OLD_JOBS_COLS = {
+        "title", "company", "location", "posted_at", "link", "platform",
+        "description", "search_keyword", "salary", "last_scraped",
+        "fingerprint", "industry"
+    }
+
     moved = 0
     for job in old_jobs:
         try:
             age_days = get_job_age_days(job.get("posted_at"))
-            
-            supabase.table("old_jobs").insert({
-                **job,
-                "original_id": job["id"],
-                "age_days_at_move": age_days,
-                "moved_at": datetime.now(timezone.utc).isoformat()
-            }).execute()
-            
+
+            # Keep only columns old_jobs actually has, plus the archive metadata
+            clean = {k: v for k, v in job.items() if k in ALLOWED_OLD_JOBS_COLS}
+            clean["original_id"] = job["id"]
+            clean["age_days_at_move"] = age_days
+            clean["moved_at"] = datetime.now(timezone.utc).isoformat()
+
+            supabase.table("old_jobs").insert(clean).execute()
+
             supabase.table("job_pool").delete().eq("id", job["id"]).execute()
             supabase.table("user_job_matches").delete().eq("job_id", job["id"]).execute()
-            
+
             moved += 1
         except Exception as e:
             log(f"  ⚠️ Error moving job {job.get('id')}: {e}")
@@ -433,15 +442,14 @@ def dataforseo_search(keyword, logger=None):
 
 # ── AI Scoring with Google Gemini 2.5 Flash ────────────────────────────────
 def _extract_score_and_industry(text):
-    """Extract score (int), industry (str), and reason (str) from AI response with better parsing"""
+    """Extract score (int) and industry (str) from AI response with better parsing"""
     score = None
     industry = None
-    reason = None
     
     try:
         cleaned = re.sub(r'```json|```', '', text).strip()
         
-        json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+        json_match = re.search(r'\{[^{}]*\}', cleaned, re.DOTALL)
         if json_match:
             try:
                 data = json.loads(json_match.group(0))
@@ -453,10 +461,6 @@ def _extract_score_and_industry(text):
                     industry = data.get("industry")
                     if industry:
                         industry = map_industry_variation(industry)
-                if "reason" in data:
-                    reason = data.get("reason")
-                    if reason:
-                        reason = str(reason).strip()[:200]
             except json.JSONDecodeError:
                 pass
     except Exception:
@@ -484,14 +488,14 @@ Description: {job_description[:500] if job_description else 'Not provided'}
 CANDIDATE:
 {user_profile[:800]}
 
-Return ONLY JSON: {{"score": 75, "industry": "Retail", "reason": "one short sentence under 15 words on why it matches"}}
+Return ONLY JSON: {{"score": 75, "industry": "Retail"}}
 Score 0-100. Industry must be exactly one of: {industry_options}"""
 
     gemini_limiter.wait_if_needed()
     
     for attempt in range(3):
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={GEMINI_API_KEY}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
             
             payload = {
                 "contents": [{
@@ -499,7 +503,7 @@ Score 0-100. Industry must be exactly one of: {industry_options}"""
                 }],
                 "generationConfig": {
                     "temperature": 0.1,
-                    "maxOutputTokens": 150
+                    "maxOutputTokens": 120
                 }
             }
             
@@ -550,7 +554,7 @@ Candidate: {user_profile[:500]}"""
         resp = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": "claude-3-haiku-20240307", "max_tokens": 120, "messages": [{"role": "user", "content": prompt}]},
+            json={"model": "claude-haiku-4-5", "max_tokens": 120, "messages": [{"role": "user", "content": prompt}]},
             timeout=15
         )
         data = resp.json()
@@ -574,29 +578,41 @@ def score_jobs_for_user(jobs, user):
     user_profile = "\n".join(profile_parts)
     
     MAX_JOBS_PER_RUN = 20
+    # Hard time budget: never spend more than this scoring one user.
+    # Protects the whole cron from hanging if Gemini is slow/rate-limited.
+    MAX_SECONDS_PER_USER = 120
+    start_time = time.time()
+
     to_score = jobs[:MAX_JOBS_PER_RUN]
-    
+
     for i, job in enumerate(to_score):
+        if time.time() - start_time > MAX_SECONDS_PER_USER:
+            print(f"    ⏱️ Time budget hit ({MAX_SECONDS_PER_USER}s) — scored {i}/{len(to_score)}, moving on")
+            for rest in to_score[i:]:
+                if not isinstance(rest.get("score"), int):
+                    rest["score"] = 0
+            break
+
         score, industry, reason = score_job_with_gemini(
             job.get("title", ""), job.get("company", ""),
             job.get("description", ""), user_profile
         )
         job["score"] = score if isinstance(score, int) else 0
         job["match_reason"] = reason
-        
+
         if industry and job.get("id") and not job.get("industry"):
             try:
                 supabase.table("job_pool").update({"industry": industry}).eq("id", job["id"]).is_("industry", "null").execute()
                 job["industry"] = industry
             except Exception:
                 pass
-        
+
         if (i + 1) % 3 == 0:
             time.sleep(2)
-    
+
     for job in jobs[MAX_JOBS_PER_RUN:]:
         job["score"] = 0
-    
+
     return jobs
 
 # ── CV + Cover Letter with Gemini ──────────────────────────────────────────
@@ -624,7 +640,7 @@ Format your response EXACTLY like this:
 ===END==="""
 
     def _call(max_tokens):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.4, "maxOutputTokens": max_tokens}
@@ -830,11 +846,8 @@ def run_full_scrape():
     logger.add("🚀 Full scrape started")
 
     try:
-        logger.add(f"📦 Archiving jobs older than {JOB_MAX_DAYS} days...")
-        moved = move_old_jobs_to_archive(logger)
-        if moved > 0:
-            logger.add(f"  ✅ Moved {moved} jobs to old_jobs")
-        
+        # Note: archiving is handled by daily_job.py as its own step.
+        # Not repeating it here to avoid double work and duplicate error logs.
         titles = supabase.table("title_pool").select("*").execute().data or []
         if not titles:
             logger.add("ℹ️ No titles in pool")
@@ -913,7 +926,6 @@ def search_and_score_for_user(user, logger=None):
                 "user_id": user_id,
                 "job_id": job["id"],
                 "score": score,
-                "match_reason": job.get("match_reason"),
                 "emailed": score >= 60
             }, on_conflict="user_id,job_id").execute()
         except Exception as e:
@@ -993,7 +1005,6 @@ def refresh_matches_for_user(user, logger=None):
                     "user_id": user_id,
                     "job_id": job["id"],
                     "score": score,
-                    "match_reason": job.get("match_reason"),
                     "emailed": False
                 }, on_conflict="user_id,job_id").execute()
             except Exception as e:
@@ -1009,24 +1020,15 @@ def refresh_matches_for_user(user, logger=None):
         _threading.Thread(target=_bg_scrape, args=(pending_titles, user_gender), daemon=True).start()
         log(f"  🌐 Background scraping {len(pending_titles)} new titles: {pending_titles}")
 
-    match_rows = supabase.table("user_job_matches").select("job_id,score,match_reason,status").eq("user_id", user_id).gte("score", 60).execute().data or []
+    match_rows = supabase.table("user_job_matches").select("job_id,score").eq("user_id", user_id).gte("score", 60).execute().data or []
     if not match_rows:
         return {"matches": [], "pending_titles": pending_titles}
 
-    # Exclude skipped jobs from the main matches list
-    active_rows = [m for m in match_rows if m.get("status") != "skipped"]
-    if not active_rows:
-        return {"matches": [], "pending_titles": pending_titles}
-
-    job_ids = [m["job_id"] for m in active_rows]
-    score_map = {m["job_id"]: m["score"] for m in active_rows}
-    reason_map = {m["job_id"]: m.get("match_reason") for m in active_rows}
-    status_map = {m["job_id"]: m.get("status", "new") for m in active_rows}
+    job_ids = [m["job_id"] for m in match_rows]
+    score_map = {m["job_id"]: m["score"] for m in match_rows}
     jobs = supabase.table("job_pool").select("*").in_("id", job_ids).execute().data or []
     for j in jobs:
         j["score"] = score_map.get(j["id"], 0)
-        j["match_reason"] = reason_map.get(j["id"])
-        j["status"] = status_map.get(j["id"], "new")
     jobs.sort(key=lambda x: x.get("score", 0), reverse=True)
 
     return {"matches": jobs, "pending_titles": pending_titles}
