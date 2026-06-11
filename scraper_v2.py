@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 JobHunter Scraper v2 — Multi-user, on-demand pool architecture
-- DataForSEO Google Jobs API (Working endpoint)
+- DataForSEO Google Jobs API
 - Supabase for storage (service role key — bypasses RLS)
-- On-demand scraping with 48h TTL cache
-- AI scoring via Google Gemini 2.0 Flash
+- On-demand scraping with 24h TTL cache
+- AI scoring via Google Gemini 2.5 Flash (free) with Claude Haiku fallback
 - Gender eligibility filter
 - Daily spend ceiling protection
 - Full run logging to Supabase scrape_logs table
@@ -43,34 +43,36 @@ for var in REQUIRED_ENV_VARS:
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-TTL_HOURS = 48
+TTL_HOURS = 48  # Re-scrape each title every 48h — UAE jobs stay live 30+ days, daily re-scraping wastes DataForSEO credits
 MAX_DAILY_SCRAPES = 200
-JOB_MAX_DAYS = 30
+JOB_MAX_DAYS = 30  # Jobs older than this are moved to old_jobs
 
-# ── Rate Limiter for Gemini (DISABLED for paid tier) ────────────────────────
+# ── Rate Limiter for Gemini ─────────────────────────────────────────────────
 class RateLimiter:
     def __init__(self, requests_per_minute=10):
         self.requests_per_minute = requests_per_minute
         self.requests = deque()
-        self.lock = threading.RLock()
-        self.enabled = False
+        self.lock = threading.RLock()  # RLock = re-entrant, safe for recursive calls
 
     def wait_if_needed(self):
-        if not self.enabled:
-            return
         with self.lock:
             while True:
                 now = time.time()
+                # Drop timestamps older than 60 seconds
                 while self.requests and self.requests[0] < now - 60:
                     self.requests.popleft()
+
                 if len(self.requests) < self.requests_per_minute:
-                    break
+                    break  # under limit — proceed
+
+                # Over limit: wait until oldest request expires, then re-check
                 wait_time = 60 - (now - self.requests[0]) + 0.5
-                print(f"    🕐 Gemini rate limiter: waiting {wait_time:.1f}s")
+                print(f"    🕐 Gemini rate limiter: waiting {wait_time:.1f}s ({len(self.requests)}/{self.requests_per_minute} RPM)")
                 time.sleep(wait_time)
+
             self.requests.append(time.time())
 
-gemini_limiter = RateLimiter(requests_per_minute=10)
+gemini_limiter = RateLimiter(requests_per_minute=10)  # Conservative — Gemini 2.5-flash free tier is ~15 RPM but 10 gives headroom
 
 # ── Trusted platforms ──────────────────────────────────────────────────────
 TRUSTED_DOMAINS = [
@@ -138,56 +140,73 @@ def validate_title(title):
     return True
 
 def map_industry_variation(industry_text):
+    """Map industry variations to standard list"""
     if not industry_text:
         return "Other"
     industry_lower = industry_text.lower()
     
     mapping = {
-        "health": "Healthcare & Pharmacy", "healthcare": "Healthcare & Pharmacy",
-        "pharmacy": "Healthcare & Pharmacy", "medical": "Healthcare & Pharmacy",
-        "retail": "Retail", "fmcg": "FMCG",
-        "logistics": "Logistics & Supply Chain", "supply chain": "Logistics & Supply Chain",
-        "tech": "Technology", "it": "Technology",
-        "finance": "Finance & Banking", "banking": "Finance & Banking",
-        "hospitality": "Hospitality & Tourism", "tourism": "Hospitality & Tourism",
-        "real estate": "Real Estate", "auto": "Automotive", "automotive": "Automotive",
-        "education": "Education", "construction": "Construction & Engineering",
-        "engineering": "Construction & Engineering", "media": "Media & Marketing",
-        "marketing": "Media & Marketing", "hr": "HR & Recruitment",
+        "health": "Healthcare & Pharmacy",
+        "healthcare": "Healthcare & Pharmacy",
+        "pharmacy": "Healthcare & Pharmacy",
+        "medical": "Healthcare & Pharmacy",
+        "retail": "Retail",
+        "fmcg": "FMCG",
+        "logistics": "Logistics & Supply Chain",
+        "supply chain": "Logistics & Supply Chain",
+        "tech": "Technology",
+        "it": "Technology",
+        "finance": "Finance & Banking",
+        "banking": "Finance & Banking",
+        "hospitality": "Hospitality & Tourism",
+        "tourism": "Hospitality & Tourism",
+        "real estate": "Real Estate",
+        "auto": "Automotive",
+        "automotive": "Automotive",
+        "education": "Education",
+        "construction": "Construction & Engineering",
+        "engineering": "Construction & Engineering",
+        "media": "Media & Marketing",
+        "marketing": "Media & Marketing",
+        "hr": "HR & Recruitment",
         "recruitment": "HR & Recruitment"
     }
     
     for key, value in mapping.items():
         if key in industry_lower:
             return value
+    
     return "Other"
 
 def infer_industry_from_text(text):
+    """Infer industry from job title/description keywords"""
     if not text:
         return "Other"
     text_lower = text.lower()
     
     keywords = {
-        "Healthcare & Pharmacy": ["nurse", "pharmacist", "doctor", "clinical", "hospital", "medical", "healthcare"],
-        "Technology": ["developer", "engineer", "software", "data", "analyst", "it", "technical", "programmer"],
-        "Retail": ["sales", "retail", "store", "shop", "merchandise", "cashier"],
-        "Finance & Banking": ["accountant", "finance", "bank", "audit", "tax", "treasury", "credit", "risk"],
-        "Logistics & Supply Chain": ["logistics", "supply chain", "warehouse", "inventory", "procurement", "shipping"],
-        "Hospitality & Tourism": ["hotel", "restaurant", "catering", "tourism", "travel", "chef"],
-        "HR & Recruitment": ["hr", "recruitment", "talent", "human resources", "hiring", "recruiter"],
-        "Construction & Engineering": ["civil", "construction", "architect", "engineer", "site"],
-        "Marketing & Media": ["marketing", "social media", "content", "seo", "digital", "brand"],
-        "Education": ["teacher", "professor", "instructor", "education", "school", "university"]
+        "Healthcare & Pharmacy": ["nurse", "pharmacist", "doctor", "clinical", "hospital", "medical", "healthcare", "patient", "clinic", "dental", "radiology", "lab", "technician", "pharmacy"],
+        "Technology": ["developer", "engineer", "software", "data", "analyst", "it", "technical", "programmer", "devops", "cloud", "security", "network", "system", "database", "api", "frontend", "backend", "full stack"],
+        "Retail": ["sales", "retail", "store", "shop", "merchandise", "cashier", "customer service", "floor manager", "visual merchandising"],
+        "Finance & Banking": ["accountant", "finance", "bank", "audit", "tax", "treasury", "credit", "risk", "investment", "controller", "payable", "receivable"],
+        "Logistics & Supply Chain": ["logistics", "supply chain", "warehouse", "inventory", "procurement", "purchase", "shipping", "freight", "transport", "distribution", "driver"],
+        "Hospitality & Tourism": ["hotel", "restaurant", "catering", "tourism", "travel", "chef", "waiter", "bartender", "front desk", "resort", "guest service"],
+        "HR & Recruitment": ["hr", "recruitment", "talent", "people", "human resources", "hiring", "recruiter", "payroll", "employee", "onboarding"],
+        "Construction & Engineering": ["civil", "construction", "architect", "engineer", "site", "project manager", "quantity surveyor", "structural", "electrical", "mechanical"],
+        "Marketing & Media": ["marketing", "social media", "content", "seo", "digital", "brand", "advertising", "campaign", "communications", "pr"],
+        "Education": ["teacher", "professor", "instructor", "education", "school", "university", "trainer", "faculty", "academic", "curriculum"]
     }
     
     for industry, words in keywords.items():
         for word in words:
             if word in text_lower:
                 return industry
+    
     return "Other"
 
 # ── Job Freshness & Archival ────────────────────────────────────────────────
 def get_job_age_days(posted_at):
+    """Calculate age of job in days from posted_at date"""
     if not posted_at:
         return None
     try:
@@ -202,6 +221,7 @@ def get_job_age_days(posted_at):
         return None
 
 def move_old_jobs_to_archive(logger=None):
+    """Move jobs older than JOB_MAX_DAYS from job_pool to old_jobs table"""
     def log(msg):
         if logger:
             logger.add(msg)
@@ -209,12 +229,15 @@ def move_old_jobs_to_archive(logger=None):
             print(msg)
     
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=JOB_MAX_DAYS)
+    
     old_jobs = supabase.table("job_pool").select("*").lt("posted_at", cutoff_date.isoformat()).execute().data or []
     
     if not old_jobs:
         log(f"📦 No jobs older than {JOB_MAX_DAYS} days to archive")
         return 0
     
+    # Only these columns exist in old_jobs — strip anything else (e.g. freshness_score)
+    # to avoid PGRST204 "column not found" errors.
     ALLOWED_OLD_JOBS_COLS = {
         "title", "company", "location", "posted_at", "link", "platform",
         "description", "search_keyword", "salary", "last_scraped",
@@ -225,21 +248,27 @@ def move_old_jobs_to_archive(logger=None):
     for job in old_jobs:
         try:
             age_days = get_job_age_days(job.get("posted_at"))
+
+            # Keep only columns old_jobs actually has, plus the archive metadata
             clean = {k: v for k, v in job.items() if k in ALLOWED_OLD_JOBS_COLS}
             clean["original_id"] = job["id"]
             clean["age_days_at_move"] = age_days
             clean["moved_at"] = datetime.now(timezone.utc).isoformat()
+
             supabase.table("old_jobs").insert(clean).execute()
+
             supabase.table("job_pool").delete().eq("id", job["id"]).execute()
             supabase.table("user_job_matches").delete().eq("job_id", job["id"]).execute()
+
             moved += 1
         except Exception as e:
             log(f"  ⚠️ Error moving job {job.get('id')}: {e}")
     
-    log(f"📦 Moved {moved} jobs to old_jobs")
+    log(f"📦 Moved {moved} jobs to old_jobs (older than {JOB_MAX_DAYS} days)")
     return moved
 
 def get_old_jobs(limit=100, offset=0):
+    """Retrieve old jobs from archive (for Old Jobs section in dashboard)"""
     try:
         result = supabase.table("old_jobs").select("*").order("moved_at", desc=True).limit(limit).offset(offset).execute()
         return result.data or []
@@ -328,7 +357,7 @@ def is_over_daily_ceiling():
         return True
     return False
 
-# 🔧 FIXED: DataForSEO with working endpoint
+# ── DataForSEO with proper error handling ─────────────────────────────────
 def dataforseo_search(keyword, logger=None):
     def log(msg):
         if logger:
@@ -337,20 +366,21 @@ def dataforseo_search(keyword, logger=None):
             print(msg)
 
     try:
-        clean_keyword = keyword.strip()
-        log(f"  📡 Posting task to DataForSEO for '{clean_keyword}'...")
+        log(f"  📡 Posting task to DataForSEO for '{keyword}'...")
 
-        # Create task
+        # Hard cap: give up on this title after 90s total — protects scrape from hanging
+        title_deadline = time.time() + 90
+
         post_resp = requests.post(
             "https://api.dataforseo.com/v3/serp/google/jobs/task_post",
             auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
             json=[{
-                "keyword": clean_keyword,
-                "location_code": 2826,  # UAE
-                "language_code": "en",
-                "depth": 50
+                "keyword": keyword,
+                "location_name": "United Arab Emirates",
+                "language_name": "English",
+                "depth": 100
             }],
-            timeout=30
+            timeout=15  # reduced from 30 — task_post should respond fast
         )
         
         if post_resp.status_code != 200:
@@ -365,38 +395,42 @@ def dataforseo_search(keyword, logger=None):
         
         task = post_data["tasks"][0]
         if task.get("status_code") not in [20000, 20100]:
-            log(f"  ❌ API error: {task.get('status_message', 'unknown')}")
+            log(f"  ❌ task_post failed: {task.get('status_message', 'unknown')}")
             return []
         
         task_id = task.get("id")
         if not task_id:
             log(f"  ❌ No task ID received")
             return []
-        
+            
         log(f"  ✅ Task created: {task_id}")
-        
-        # Poll for results
+
         items = None
         for attempt in range(8):
+            # Bail out if we've exceeded this title's time budget
+            if time.time() > title_deadline:
+                log(f"  ⏱️ Title timeout (90s) — skipping '{keyword}', moving on")
+                return []
+
             wait = [3, 5, 8, 12, 15, 20, 25, 30][attempt]
             log(f"  📥 Waiting {wait}s (attempt {attempt + 1}/8)...")
             time.sleep(wait)
-            
+
             get_resp = requests.get(
                 f"https://api.dataforseo.com/v3/serp/google/jobs/task_get/advanced/{task_id}",
                 auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
-                timeout=30
+                timeout=15  # reduced from 30
             )
             
             if get_resp.status_code != 200:
                 log(f"  ⚠️ HTTP {get_resp.status_code}, retrying...")
                 continue
-            
+                
             get_data = get_resp.json()
             
             if not get_data.get("tasks"):
                 continue
-            
+                
             result_tasks = get_data["tasks"][0].get("result")
             if result_tasks and len(result_tasks) > 0:
                 items = result_tasks[0].get("items", [])
@@ -407,25 +441,27 @@ def dataforseo_search(keyword, logger=None):
                     log(f"  ⚠️ No items in result, retrying...")
             else:
                 log(f"  ⏳ No result yet, retrying...")
-        
+
         if not items:
             log(f"  ❌ No results after 8 attempts")
             return []
-        
+
         return items
 
     except Exception as e:
         log(f"  ❌ DataForSEO error: {e}")
         return []
 
-# ── AI Scoring with Gemini 2.0 Flash ────────────────────────────────
+# ── AI Scoring with Google Gemini 2.5 Flash ────────────────────────────────
 def _extract_score_and_industry(text):
+    """Extract score (int), industry (str), and reason (str) from AI response"""
     score = None
     industry = None
-    reason = None
+    reason = None  # always initialised — prevents NameError if JSON parsing skipped
 
     try:
         cleaned = re.sub(r'```json|```', '', text).strip()
+
         json_match = re.search(r'\{[^{}]*\}', cleaned, re.DOTALL)
         if json_match:
             try:
@@ -467,23 +503,30 @@ Description: {job_description[:500] if job_description else 'Not provided'}
 CANDIDATE:
 {user_profile[:800]}
 
-Return ONLY JSON: {{"score": 75, "industry": "Retail", "reason": "brief reason"}}
+Return ONLY JSON: {{"score": 75, "industry": "Retail"}}
 Score 0-100. Industry must be exactly one of: {industry_options}"""
 
+    gemini_limiter.wait_if_needed()
+    
     for attempt in range(3):
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
             
             payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 120}
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": 120
+                }
             }
             
             resp = requests.post(url, json=payload, timeout=15)
             
             if resp.status_code == 429:
-                wait = [1, 2, 3][attempt]
-                print(f"    ⏳ Rate limited, waiting {wait}s (attempt {attempt+1}/3)")
+                wait = [2, 5, 10][attempt]
+                print(f"    ⚠️ Gemini rate limited, waiting {wait}s (attempt {attempt+1}/3)")
                 time.sleep(wait)
                 continue
             
@@ -516,7 +559,7 @@ def score_job_with_haiku(job_title, job_company, job_description, user_profile):
         return 0, None, None
         
     industry_options = ", ".join(INDUSTRY_LIST)
-    prompt = f"""Score this job match 0-100 and identify the industry. Return only JSON: {{"score": N, "industry": "Industry Name", "reason": "short reason"}}
+    prompt = f"""Score this job match 0-100 and identify the industry. Return only JSON: {{"score": N, "industry": "Industry Name", "reason": "short reason under 15 words"}}
 Industry must be one of: {industry_options}
 Job: {job_title} at {job_company}
 Description: {job_description[:300] if job_description else ""}
@@ -549,7 +592,9 @@ def score_jobs_for_user(jobs, user):
         return jobs
     user_profile = "\n".join(profile_parts)
     
-    MAX_JOBS_PER_RUN = 50
+    MAX_JOBS_PER_RUN = 50   # Score up to 50 NEW jobs per user per run
+    # Hard time budget per user — prevents one slow user blocking everyone else.
+    # 7 users × 300s = 35 min max total scoring time, well within Railway cron limits.
     MAX_SECONDS_PER_USER = 300
     start_time = time.time()
 
@@ -585,7 +630,7 @@ def score_jobs_for_user(jobs, user):
 
     return jobs
 
-# ── CV + Cover Letter ──────────────────────────────────────────
+# ── CV + Cover Letter with Gemini ──────────────────────────────────────────
 def generate_cv_cover_letter(user, job):
     prompt = f"""You are an expert UAE career writer. Write a tailored cover letter and a tailored CV for this job application.
 
@@ -599,7 +644,7 @@ CANDIDATE PROFILE:
 CANDIDATE CV:
 {user.get('cv_text', '')[:2500]}
 
-Write a professional, specific cover letter (3-4 short paragraphs) and a tailored CV.
+Write a professional, specific cover letter (3-4 short paragraphs) and a tailored CV that highlights the most relevant experience for THIS role.
 
 Format your response EXACTLY like this:
 
@@ -610,7 +655,7 @@ Format your response EXACTLY like this:
 ===END==="""
 
     def _call(max_tokens):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.4, "maxOutputTokens": max_tokens}
@@ -816,6 +861,8 @@ def run_full_scrape():
     logger.add("🚀 Full scrape started")
 
     try:
+        # Note: archiving is handled by daily_job.py as its own step.
+        # Not repeating it here to avoid double work and duplicate error logs.
         titles = supabase.table("title_pool").select("*").execute().data or []
         if not titles:
             logger.add("ℹ️ No titles in pool")
@@ -859,6 +906,8 @@ def search_and_score_for_user(user, logger=None):
     seen_links = set()
     seen_fingerprints = set()
 
+    # Skip jobs already scored for this user — no point re-scoring them daily.
+    # This means the 20-job scoring budget is spent on NEW jobs each run.
     existing_matches = supabase.table("user_job_matches").select("job_id").eq("user_id", user_id).execute()
     already_scored = {r["job_id"] for r in (existing_matches.data or [])}
 
@@ -866,7 +915,7 @@ def search_and_score_for_user(user, logger=None):
         jobs = search_jobs(t["keyword"], user_gender=user_gender, logger=logger)
         for j in jobs:
             if j.get("id") in already_scored:
-                continue
+                continue  # already scored — skip
             link = j.get("link", "")
             fingerprint = j.get("fingerprint", "")
             
