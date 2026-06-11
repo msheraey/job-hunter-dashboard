@@ -43,32 +43,36 @@ for var in REQUIRED_ENV_VARS:
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-TTL_HOURS = 24
+TTL_HOURS = 48  # Re-scrape each title every 48h — UAE jobs stay live 30+ days, daily re-scraping wastes DataForSEO credits
 MAX_DAILY_SCRAPES = 200
 JOB_MAX_DAYS = 30  # Jobs older than this are moved to old_jobs
 
 # ── Rate Limiter for Gemini ─────────────────────────────────────────────────
 class RateLimiter:
-    def __init__(self, requests_per_minute=15):
+    def __init__(self, requests_per_minute=10):
         self.requests_per_minute = requests_per_minute
         self.requests = deque()
-        self.lock = threading.Lock()
-    
+        self.lock = threading.RLock()  # RLock = re-entrant, safe for recursive calls
+
     def wait_if_needed(self):
         with self.lock:
-            now = time.time()
-            while self.requests and self.requests[0] < now - 60:
-                self.requests.popleft()
-            
-            if len(self.requests) >= self.requests_per_minute:
-                wait_time = 60 - (now - self.requests[0])
-                if wait_time > 0:
-                    time.sleep(wait_time + 0.5)
-                    return self.wait_if_needed()
-            
+            while True:
+                now = time.time()
+                # Drop timestamps older than 60 seconds
+                while self.requests and self.requests[0] < now - 60:
+                    self.requests.popleft()
+
+                if len(self.requests) < self.requests_per_minute:
+                    break  # under limit — proceed
+
+                # Over limit: wait until oldest request expires, then re-check
+                wait_time = 60 - (now - self.requests[0]) + 0.5
+                print(f"    🕐 Gemini rate limiter: waiting {wait_time:.1f}s ({len(self.requests)}/{self.requests_per_minute} RPM)")
+                time.sleep(wait_time)
+
             self.requests.append(time.time())
 
-gemini_limiter = RateLimiter(requests_per_minute=15)
+gemini_limiter = RateLimiter(requests_per_minute=10)  # Conservative — Gemini 2.5-flash free tier is ~15 RPM but 10 gives headroom
 
 # ── Trusted platforms ──────────────────────────────────────────────────────
 TRUSTED_DOMAINS = [
@@ -363,7 +367,10 @@ def dataforseo_search(keyword, logger=None):
 
     try:
         log(f"  📡 Posting task to DataForSEO for '{keyword}'...")
-        
+
+        # Hard cap: give up on this title after 90s total — protects scrape from hanging
+        title_deadline = time.time() + 90
+
         post_resp = requests.post(
             "https://api.dataforseo.com/v3/serp/google/jobs/task_post",
             auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
@@ -373,7 +380,7 @@ def dataforseo_search(keyword, logger=None):
                 "language_name": "English",
                 "depth": 100
             }],
-            timeout=30
+            timeout=15  # reduced from 30 — task_post should respond fast
         )
         
         if post_resp.status_code != 200:
@@ -400,14 +407,19 @@ def dataforseo_search(keyword, logger=None):
 
         items = None
         for attempt in range(8):
+            # Bail out if we've exceeded this title's time budget
+            if time.time() > title_deadline:
+                log(f"  ⏱️ Title timeout (90s) — skipping '{keyword}', moving on")
+                return []
+
             wait = [3, 5, 8, 12, 15, 20, 25, 30][attempt]
             log(f"  📥 Waiting {wait}s (attempt {attempt + 1}/8)...")
             time.sleep(wait)
-            
+
             get_resp = requests.get(
                 f"https://api.dataforseo.com/v3/serp/google/jobs/task_get/advanced/{task_id}",
                 auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
-                timeout=30
+                timeout=15  # reduced from 30
             )
             
             if get_resp.status_code != 200:
@@ -580,10 +592,10 @@ def score_jobs_for_user(jobs, user):
         return jobs
     user_profile = "\n".join(profile_parts)
     
-    MAX_JOBS_PER_RUN = 20
-    # Hard time budget: never spend more than this scoring one user.
-    # Protects the whole cron from hanging if Gemini is slow/rate-limited.
-    MAX_SECONDS_PER_USER = 120
+    MAX_JOBS_PER_RUN = 50   # Score up to 50 NEW jobs per user per run
+    # Hard time budget per user — prevents one slow user blocking everyone else.
+    # 7 users × 300s = 35 min max total scoring time, well within Railway cron limits.
+    MAX_SECONDS_PER_USER = 300
     start_time = time.time()
 
     to_score = jobs[:MAX_JOBS_PER_RUN]
@@ -894,9 +906,16 @@ def search_and_score_for_user(user, logger=None):
     seen_links = set()
     seen_fingerprints = set()
 
+    # Skip jobs already scored for this user — no point re-scoring them daily.
+    # This means the 20-job scoring budget is spent on NEW jobs each run.
+    existing_matches = supabase.table("user_job_matches").select("job_id").eq("user_id", user_id).execute()
+    already_scored = {r["job_id"] for r in (existing_matches.data or [])}
+
     for t in (titles.data or []):
         jobs = search_jobs(t["keyword"], user_gender=user_gender, logger=logger)
         for j in jobs:
+            if j.get("id") in already_scored:
+                continue  # already scored — skip
             link = j.get("link", "")
             fingerprint = j.get("fingerprint", "")
             
@@ -913,7 +932,7 @@ def search_and_score_for_user(user, logger=None):
         return []
 
     if len(all_jobs) > 50:
-        log(f"  ⚠️ Limiting from {len(all_jobs)} to 50 jobs for scoring")
+        log(f"  ⚠️ Limiting from {len(all_jobs)} to 50 new jobs for scoring")
         all_jobs = all_jobs[:50]
 
     log(f"  🤖 Scoring {len(all_jobs)} unique jobs...")
