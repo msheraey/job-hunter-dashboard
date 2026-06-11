@@ -442,13 +442,14 @@ def dataforseo_search(keyword, logger=None):
 
 # ── AI Scoring with Google Gemini 2.5 Flash ────────────────────────────────
 def _extract_score_and_industry(text):
-    """Extract score (int) and industry (str) from AI response with better parsing"""
+    """Extract score (int), industry (str), and reason (str) from AI response"""
     score = None
     industry = None
-    
+    reason = None  # always initialised — prevents NameError if JSON parsing skipped
+
     try:
         cleaned = re.sub(r'```json|```', '', text).strip()
-        
+
         json_match = re.search(r'\{[^{}]*\}', cleaned, re.DOTALL)
         if json_match:
             try:
@@ -461,6 +462,8 @@ def _extract_score_and_industry(text):
                     industry = data.get("industry")
                     if industry:
                         industry = map_industry_variation(industry)
+                if "reason" in data:
+                    reason = str(data["reason"]).strip()[:200] or None
             except json.JSONDecodeError:
                 pass
     except Exception:
@@ -926,6 +929,7 @@ def search_and_score_for_user(user, logger=None):
                 "user_id": user_id,
                 "job_id": job["id"],
                 "score": score,
+                "match_reason": job.get("match_reason"),
                 "emailed": score >= 60
             }, on_conflict="user_id,job_id").execute()
         except Exception as e:
@@ -1005,6 +1009,7 @@ def refresh_matches_for_user(user, logger=None):
                     "user_id": user_id,
                     "job_id": job["id"],
                     "score": score,
+                    "match_reason": job.get("match_reason"),
                     "emailed": False
                 }, on_conflict="user_id,job_id").execute()
             except Exception as e:
