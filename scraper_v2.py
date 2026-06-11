@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 JobHunter Scraper v2 — Multi-user, on-demand pool architecture
-- DataForSEO Google Jobs API
+- DataForSEO Google Jobs API (LIVE endpoint - immediate results)
 - Supabase for storage (service role key — bypasses RLS)
-- On-demand scraping with 24h TTL cache
-- AI scoring via Google Gemini 2.5 Flash (free) with Claude Haiku fallback
+- On-demand scraping with 48h TTL cache
+- AI scoring via Google Gemini 1.5 Flash (paid - reliable)
 - Gender eligibility filter
 - Daily spend ceiling protection
 - Full run logging to Supabase scrape_logs table
@@ -43,36 +43,38 @@ for var in REQUIRED_ENV_VARS:
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-TTL_HOURS = 48  # Re-scrape each title every 48h — UAE jobs stay live 30+ days, daily re-scraping wastes DataForSEO credits
+TTL_HOURS = 48  # Re-scrape each title every 48h — UAE jobs stay live 30+ days
 MAX_DAILY_SCRAPES = 200
 JOB_MAX_DAYS = 30  # Jobs older than this are moved to old_jobs
 
-# ── Rate Limiter for Gemini ─────────────────────────────────────────────────
+# ── Rate Limiter for Gemini (DISABLED for paid tier) ────────────────────────
+# Keep the class but make wait_if_needed a no-op for paid tier
 class RateLimiter:
     def __init__(self, requests_per_minute=10):
         self.requests_per_minute = requests_per_minute
         self.requests = deque()
-        self.lock = threading.RLock()  # RLock = re-entrant, safe for recursive calls
+        self.lock = threading.RLock()
+        self.enabled = False  # DISABLED for paid Gemini tier
 
     def wait_if_needed(self):
+        if not self.enabled:
+            return  # No rate limiting for paid tier
         with self.lock:
             while True:
                 now = time.time()
-                # Drop timestamps older than 60 seconds
                 while self.requests and self.requests[0] < now - 60:
                     self.requests.popleft()
 
                 if len(self.requests) < self.requests_per_minute:
-                    break  # under limit — proceed
+                    break
 
-                # Over limit: wait until oldest request expires, then re-check
                 wait_time = 60 - (now - self.requests[0]) + 0.5
                 print(f"    🕐 Gemini rate limiter: waiting {wait_time:.1f}s ({len(self.requests)}/{self.requests_per_minute} RPM)")
                 time.sleep(wait_time)
 
             self.requests.append(time.time())
 
-gemini_limiter = RateLimiter(requests_per_minute=10)  # Conservative — Gemini 2.5-flash free tier is ~15 RPM but 10 gives headroom
+gemini_limiter = RateLimiter(requests_per_minute=10)  # Disabled by default
 
 # ── Trusted platforms ──────────────────────────────────────────────────────
 TRUSTED_DOMAINS = [
@@ -236,8 +238,6 @@ def move_old_jobs_to_archive(logger=None):
         log(f"📦 No jobs older than {JOB_MAX_DAYS} days to archive")
         return 0
     
-    # Only these columns exist in old_jobs — strip anything else (e.g. freshness_score)
-    # to avoid PGRST204 "column not found" errors.
     ALLOWED_OLD_JOBS_COLS = {
         "title", "company", "location", "posted_at", "link", "platform",
         "description", "search_keyword", "salary", "last_scraped",
@@ -249,7 +249,6 @@ def move_old_jobs_to_archive(logger=None):
         try:
             age_days = get_job_age_days(job.get("posted_at"))
 
-            # Keep only columns old_jobs actually has, plus the archive metadata
             clean = {k: v for k, v in job.items() if k in ALLOWED_OLD_JOBS_COLS}
             clean["original_id"] = job["id"]
             clean["age_days_at_move"] = age_days
@@ -357,7 +356,7 @@ def is_over_daily_ceiling():
         return True
     return False
 
-# ── DataForSEO with proper error handling ─────────────────────────────────
+# ── DataForSEO with LIVE endpoint (immediate results, no polling) ─────────
 def dataforseo_search(keyword, logger=None):
     def log(msg):
         if logger:
@@ -366,12 +365,9 @@ def dataforseo_search(keyword, logger=None):
             print(msg)
 
     try:
-        log(f"  📡 Posting task to DataForSEO for '{keyword}'...")
+        log(f"  📡 Fetching live results from DataForSEO for '{keyword}'...")
 
-        # Hard cap: give up on this title after 90s total — protects scrape from hanging
-        title_deadline = time.time() + 90
-
-        post_resp = requests.post(
+        response = requests.post(
             "https://api.dataforseo.com/v3/serp/google/jobs/live/advanced",
             auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
             json=[{
@@ -380,84 +376,44 @@ def dataforseo_search(keyword, logger=None):
                 "language_name": "English",
                 "depth": 100
             }],
-            timeout=15  # reduced from 30 — task_post should respond fast
+            timeout=30
         )
         
-        if post_resp.status_code != 200:
-            log(f"  ❌ HTTP {post_resp.status_code}: {post_resp.text[:200]}")
+        if response.status_code != 200:
+            log(f"  ❌ HTTP {response.status_code}: {response.text[:200]}")
             return []
         
-        post_data = post_resp.json()
+        data = response.json()
         
-        if not post_data.get("tasks"):
+        if not data.get("tasks"):
             log(f"  ❌ No tasks in response")
             return []
         
-        task = post_data["tasks"][0]
+        task = data["tasks"][0]
         if task.get("status_code") not in [20000, 20100]:
-            log(f"  ❌ task_post failed: {task.get('status_message', 'unknown')}")
+            log(f"  ❌ API error: {task.get('status_message', 'unknown')}")
             return []
         
-        task_id = task.get("id")
-        if not task_id:
-            log(f"  ❌ No task ID received")
+        result = task.get("result", [])
+        if not result:
+            log(f"  ❌ No results in response")
             return []
-            
-        log(f"  ✅ Task created: {task_id}")
-
-        items = None
-        for attempt in range(8):
-            # Bail out if we've exceeded this title's time budget
-            if time.time() > title_deadline:
-                log(f"  ⏱️ Title timeout (90s) — skipping '{keyword}', moving on")
-                return []
-
-            wait = [3, 5, 8, 12, 15, 20, 25, 30][attempt]
-            log(f"  📥 Waiting {wait}s (attempt {attempt + 1}/8)...")
-            time.sleep(wait)
-
-            get_resp = requests.get(
-                f"https://api.dataforseo.com/v3/serp/google/jobs/task_get/advanced/{task_id}",
-                auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
-                timeout=15  # reduced from 30
-            )
-            
-            if get_resp.status_code != 200:
-                log(f"  ⚠️ HTTP {get_resp.status_code}, retrying...")
-                continue
-                
-            get_data = get_resp.json()
-            
-            if not get_data.get("tasks"):
-                continue
-                
-            result_tasks = get_data["tasks"][0].get("result")
-            if result_tasks and len(result_tasks) > 0:
-                items = result_tasks[0].get("items", [])
-                if items:
-                    log(f"  ✅ Got {len(items)} results")
-                    break
-                else:
-                    log(f"  ⚠️ No items in result, retrying...")
-            else:
-                log(f"  ⏳ No result yet, retrying...")
-
-        if not items:
-            log(f"  ❌ No results after 8 attempts")
-            return []
-
+        
+        items = result[0].get("items", [])
+        log(f"  ✅ Got {len(items)} results directly (live endpoint)")
+        
         return items
 
     except Exception as e:
         log(f"  ❌ DataForSEO error: {e}")
         return []
 
-# ── AI Scoring with Google Gemini 2.5 Flash ────────────────────────────────
+# ── AI Scoring with Google Gemini 1.5 Flash (PAID - reliable) ─────────────
 def _extract_score_and_industry(text):
     """Extract score (int), industry (str), and reason (str) from AI response"""
     score = None
     industry = None
-    reason = None  # always initialised — prevents NameError if JSON parsing skipped
+    reason = None
 
     try:
         cleaned = re.sub(r'```json|```', '', text).strip()
@@ -503,14 +459,16 @@ Description: {job_description[:500] if job_description else 'Not provided'}
 CANDIDATE:
 {user_profile[:800]}
 
-Return ONLY JSON: {{"score": 75, "industry": "Retail"}}
+Return ONLY JSON: {{"score": 75, "industry": "Retail", "reason": "brief reason"}}
 Score 0-100. Industry must be exactly one of: {industry_options}"""
 
-    gemini_limiter.wait_if_needed()
+    # Rate limiter is disabled for paid tier
+    # gemini_limiter.wait_if_needed()
     
     for attempt in range(3):
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+            # Using paid Gemini 1.5 Flash model
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
             
             payload = {
                 "contents": [{
@@ -525,8 +483,8 @@ Score 0-100. Industry must be exactly one of: {industry_options}"""
             resp = requests.post(url, json=payload, timeout=15)
             
             if resp.status_code == 429:
-                wait = [2, 5, 10][attempt]
-                print(f"    ⚠️ Gemini rate limited, waiting {wait}s (attempt {attempt+1}/3)")
+                wait = [1, 2, 3][attempt]
+                print(f"    ⏳ Rate limited, waiting {wait}s (attempt {attempt+1}/3)")
                 time.sleep(wait)
                 continue
             
@@ -592,9 +550,7 @@ def score_jobs_for_user(jobs, user):
         return jobs
     user_profile = "\n".join(profile_parts)
     
-    MAX_JOBS_PER_RUN = 50   # Score up to 50 NEW jobs per user per run
-    # Hard time budget per user — prevents one slow user blocking everyone else.
-    # 7 users × 300s = 35 min max total scoring time, well within Railway cron limits.
+    MAX_JOBS_PER_RUN = 50
     MAX_SECONDS_PER_USER = 300
     start_time = time.time()
 
@@ -655,7 +611,7 @@ Format your response EXACTLY like this:
 ===END==="""
 
     def _call(max_tokens):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.4, "maxOutputTokens": max_tokens}
@@ -861,8 +817,6 @@ def run_full_scrape():
     logger.add("🚀 Full scrape started")
 
     try:
-        # Note: archiving is handled by daily_job.py as its own step.
-        # Not repeating it here to avoid double work and duplicate error logs.
         titles = supabase.table("title_pool").select("*").execute().data or []
         if not titles:
             logger.add("ℹ️ No titles in pool")
@@ -906,8 +860,6 @@ def search_and_score_for_user(user, logger=None):
     seen_links = set()
     seen_fingerprints = set()
 
-    # Skip jobs already scored for this user — no point re-scoring them daily.
-    # This means the 20-job scoring budget is spent on NEW jobs each run.
     existing_matches = supabase.table("user_job_matches").select("job_id").eq("user_id", user_id).execute()
     already_scored = {r["job_id"] for r in (existing_matches.data or [])}
 
@@ -915,7 +867,7 @@ def search_and_score_for_user(user, logger=None):
         jobs = search_jobs(t["keyword"], user_gender=user_gender, logger=logger)
         for j in jobs:
             if j.get("id") in already_scored:
-                continue  # already scored — skip
+                continue
             link = j.get("link", "")
             fingerprint = j.get("fingerprint", "")
             
