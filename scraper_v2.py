@@ -372,7 +372,7 @@ def dataforseo_search(keyword, logger=None):
         title_deadline = time.time() + 90
 
         post_resp = requests.post(
-            "https://api.dataforseo.com/v3/serp/google/jobs/task_post",
+            "https://api.dataforseo.com/v3/serp/google/jobs/live/advanced",
             auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
             json=[{
                 "keyword": keyword,
