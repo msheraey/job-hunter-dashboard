@@ -4,7 +4,7 @@ JobHunter Scraper v2 — Multi-user, on-demand pool architecture
 - DataForSEO Google Jobs API (LIVE endpoint - immediate results)
 - Supabase for storage (service role key — bypasses RLS)
 - On-demand scraping with 48h TTL cache
-- AI scoring via Google Gemini 1.5 Flash (paid - reliable)
+- AI scoring via Google Gemini 2.0 Flash (fast & reliable)
 - Gender eligibility filter
 - Daily spend ceiling protection
 - Full run logging to Supabase scrape_logs table
@@ -43,12 +43,11 @@ for var in REQUIRED_ENV_VARS:
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-TTL_HOURS = 48  # Re-scrape each title every 48h — UAE jobs stay live 30+ days
+TTL_HOURS = 48  # Re-scrape each title every 48h
 MAX_DAILY_SCRAPES = 200
 JOB_MAX_DAYS = 30  # Jobs older than this are moved to old_jobs
 
 # ── Rate Limiter for Gemini (DISABLED for paid tier) ────────────────────────
-# Keep the class but make wait_if_needed a no-op for paid tier
 class RateLimiter:
     def __init__(self, requests_per_minute=10):
         self.requests_per_minute = requests_per_minute
@@ -356,7 +355,7 @@ def is_over_daily_ceiling():
         return True
     return False
 
-# ── DataForSEO with LIVE endpoint (immediate results, no polling) ─────────
+# 🔧 FIXED: DataForSEO with LIVE endpoint (immediate results, no polling)
 def dataforseo_search(keyword, logger=None):
     def log(msg):
         if logger:
@@ -365,13 +364,15 @@ def dataforseo_search(keyword, logger=None):
             print(msg)
 
     try:
-        log(f"  📡 Fetching live results from DataForSEO for '{keyword}'...")
+        # Clean and encode the keyword
+        clean_keyword = keyword.strip()
+        log(f"  📡 Fetching live results from DataForSEO for '{clean_keyword}'...")
 
         response = requests.post(
             "https://api.dataforseo.com/v3/serp/google/jobs/live/advanced",
             auth=(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD),
             json=[{
-                "keyword": keyword,
+                "keyword": clean_keyword,
                 "location_name": "United Arab Emirates",
                 "language_name": "English",
                 "depth": 100
@@ -408,7 +409,7 @@ def dataforseo_search(keyword, logger=None):
         log(f"  ❌ DataForSEO error: {e}")
         return []
 
-# ── AI Scoring with Google Gemini 1.5 Flash (PAID - reliable) ─────────────
+# ── AI Scoring with Google Gemini 2.0 Flash (FAST & RELIABLE) ─────────────
 def _extract_score_and_industry(text):
     """Extract score (int), industry (str), and reason (str) from AI response"""
     score = None
@@ -447,6 +448,7 @@ def _extract_score_and_industry(text):
     
     return score, industry, reason
 
+# 🔧 FIXED: Using correct Gemini 2.0 Flash model
 def score_job_with_gemini(job_title, job_company, job_description, user_profile):
     industry_options = ", ".join(INDUSTRY_LIST)
     prompt = f"""You are a job matching expert. Score how well this job matches the candidate and identify the job industry.
@@ -467,8 +469,8 @@ Score 0-100. Industry must be exactly one of: {industry_options}"""
     
     for attempt in range(3):
         try:
-            # Using paid Gemini 1.5 Flash model
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            # 🔧 FIXED: Using gemini-2.0-flash (correct model name)
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
             
             payload = {
                 "contents": [{
@@ -586,7 +588,7 @@ def score_jobs_for_user(jobs, user):
 
     return jobs
 
-# ── CV + Cover Letter with Gemini ──────────────────────────────────────────
+# 🔧 FIXED: CV generation with correct Gemini model
 def generate_cv_cover_letter(user, job):
     prompt = f"""You are an expert UAE career writer. Write a tailored cover letter and a tailored CV for this job application.
 
@@ -611,7 +613,8 @@ Format your response EXACTLY like this:
 ===END==="""
 
     def _call(max_tokens):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        # 🔧 FIXED: Using gemini-2.0-flash (correct model name)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.4, "maxOutputTokens": max_tokens}
