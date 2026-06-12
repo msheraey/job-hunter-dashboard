@@ -6,7 +6,7 @@ skipped/applied jobs never re-emailed, quality score attached to matches.
 import threading
 import config
 from config import get_supabase
-from core.db import safe_select, safe_upsert
+from core.db import safe_select, safe_upsert, safe_update
 from services.scraper import search_jobs
 from services.scorer import score_jobs_for_user
 from services.classifier import quality_score
@@ -146,6 +146,7 @@ def refresh_matches_for_user(user, logger=None):
     for j in jobs:
         r = rmap.get(j["id"], {})
         j["score"] = r.get("score", 0)
+        j["status"] = r.get("status", "new")
         j["match_reason"] = r.get("match_reason") or j.get("match_reason")
         j["quality_score"] = r.get("quality_score") or quality_score(j)
     jobs.sort(key=lambda x: (x.get("score", 0), x.get("quality_score", 0)), reverse=True)

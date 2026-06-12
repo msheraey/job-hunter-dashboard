@@ -33,4 +33,6 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active timestamptz;
 
 -- quality_score on matches (mirrors job_pool.quality_score; lets frontend query it directly)
 ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS quality_score int;
-ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS match_reason text;
+
+-- created_at timestamp for analytics (new-today counts, etc.)
+ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
