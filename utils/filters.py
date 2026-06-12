@@ -41,3 +41,39 @@ def validate_title(title):
 def make_fingerprint(title, company, location):
     fp = f"{normalize_title(title)}|{(company or '').lower()}|{(location or 'UAE').lower()}"
     return re.sub(r"[^a-z0-9|]", "", fp)[:200]
+
+# ── Industry inference ──────────────────────────────────────
+INDUSTRY_KEYWORDS = {
+    "Healthcare & Pharmacy": ["pharmacist","pharmacy","nurse","doctor","clinical","hospital",
+        "medical","healthcare","patient","clinic","dental","radiology","lab","technician"],
+    "Technology": ["developer","software","data","analyst","it support","programmer","devops",
+        "cloud","cybersecurity","network","system","database","api","frontend","backend","full stack"],
+    "Retail": ["retail","store","shop","merchandise","cashier","visual merchandising","floor manager"],
+    "FMCG": ["fmcg","consumer goods","brand manager","trade marketing","modern trade"],
+    "Finance & Banking": ["accountant","finance","bank","audit","tax","treasury","credit","risk",
+        "investment","controller","payable","receivable","cfo"],
+    "Logistics & Supply Chain": ["logistics","supply chain","warehouse","inventory","procurement",
+        "purchase","shipping","freight","transport","distribution","driver","fleet"],
+    "Hospitality & Tourism": ["hotel","restaurant","catering","tourism","travel","chef",
+        "waiter","bartender","front desk","resort","guest service","f&b"],
+    "Real Estate": ["real estate","property","leasing","broker","valuation","facility"],
+    "Automotive": ["automotive","vehicle","dealership","mechanic","service advisor","parts"],
+    "Education": ["teacher","professor","instructor","education","school","university",
+        "trainer","faculty","academic","curriculum","learning"],
+    "Construction & Engineering": ["civil","construction","architect","engineer","site manager",
+        "quantity surveyor","structural","electrical","mechanical","project manager"],
+    "Media & Marketing": ["marketing","social media","content","seo","digital","brand",
+        "advertising","campaign","communications","pr","copywriter"],
+    "HR & Recruitment": ["hr","human resources","recruitment","talent","hiring",
+        "recruiter","payroll","employee","onboarding","people"],
+}
+
+def infer_industry(title="", description=""):
+    """Keyword fallback — used when AI scoring does not return an industry."""
+    text = f"{title} {description}".lower()
+    scores = {}
+    for industry, words in INDUSTRY_KEYWORDS.items():
+        hits = sum(1 for w in words if w in text)
+        if hits:
+            scores[industry] = hits
+    return max(scores, key=scores.get) if scores else "Other"

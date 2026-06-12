@@ -10,6 +10,7 @@ import time
 import requests
 import config
 import prompts
+from utils.filters import infer_industry
 from core.retry import CircuitBreaker
 from core.db import safe_update
 
@@ -38,11 +39,12 @@ def map_industry(text):
             return v
     return "Other"
 
-def parse_ai_json(text):
+def parse_ai_json(text, title="", description=""):
     """Extract the result dict from an AI response. Defensive against markdown fences."""
     out = {"score": None, "industry": None, "reason": None,
            "seniority": None, "remote": None, "visa_likelihood": None}
     if not text:
+        out["industry"] = infer_industry(title, description)
         return out
     cleaned = re.sub(r"```json|```", "", text).strip()
     m = re.search(r"\{.*\}", cleaned, re.DOTALL)
@@ -67,6 +69,11 @@ def parse_ai_json(text):
         m2 = re.search(r"\b([1-9]?\d|100)\b", cleaned)
         if m2:
             out["score"] = max(0, min(100, int(m2.group(1))))
+    # Keyword fallback if AI returned no industry
+    if not out["industry"] or out["industry"] == "Other":
+        keyword_industry = infer_industry(title, description)
+        if keyword_industry != "Other":
+            out["industry"] = keyword_industry
     return out
 
 def _call_groq(prompt):
@@ -138,7 +145,7 @@ def score_job(job, user_profile):
         job.get("title", ""), job.get("company", ""),
         job.get("description", ""), user_profile, ", ".join(config.INDUSTRY_LIST))
     text = ai_complete(prompt, label="scoring")
-    return parse_ai_json(text)
+    return parse_ai_json(text, title=job.get("title", ""), description=job.get("description", ""))
 
 def score_jobs_for_user(jobs, user):
     """Score up to MAX_JOBS_PER_USER within MAX_SECONDS_PER_USER. Enrich job_pool."""

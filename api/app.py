@@ -194,18 +194,89 @@ def api_generate_cv():
     body = request.get_json(silent=True) or {}
     user = _user(body.get("user_id"))
     jobs = safe_select("job_pool", id=body.get("job_id"))
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    if not jobs:
+        return jsonify({"error": "Job not found"}), 404
+    if not user.get("cv_text") and not user.get("profile_summary"):
+        return jsonify({"error": "Please add your profile summary or upload your CV first"}), 422
+
+    from services.cv_generator import generate_cover_letter_docx, generate_cv_docx
+    import base64
+
+    cl_bytes, cl_file, cl_plain = generate_cover_letter_docx(user, jobs[0])
+    cv_bytes, cv_file, cv_plain = generate_cv_docx(user, jobs[0])
+
+    if not cl_bytes and not cv_bytes:
+        return jsonify({"error": "Generation failed — all AI providers unavailable, try again"}), 502
+
+    result = {
+        "cover_letter": cl_plain,
+        "tailored_cv": cv_plain,
+        "cover_letter_ok": bool(cl_bytes),
+        "tailored_cv_ok": bool(cv_bytes),
+        "cl_docx_b64": base64.b64encode(cl_bytes).decode() if cl_bytes else None,
+        "cv_docx_b64": base64.b64encode(cv_bytes).decode() if cv_bytes else None,
+        "cl_filename": cl_file,
+        "cv_filename": cv_file,
+        "job_title": jobs[0].get("title", ""),
+        "company": jobs[0].get("company", ""),
+    }
+    # Email in background
+    def send_bg():
+        try:
+            from email_service import send_cv_cover_letter_email
+            send_cv_cover_letter_email(
+                user["email"], user.get("name", ""),
+                jobs[0].get("title"), jobs[0].get("company"),
+                cv_plain, cl_plain)
+        except Exception as e:
+            print(f"  ⚠️ CV email: {e}")
+    import threading
+    threading.Thread(target=send_bg, daemon=True).start()
+    return jsonify(result)
+
+@app.route("/api/download-cv", methods=["POST"])
+def api_download_cv():
+    """Direct file download endpoint for the CV DOCX."""
+    from flask import send_file
+    from services.cv_generator import generate_cv_docx
+    import io
+    body = request.get_json(silent=True) or {}
+    user = _user(body.get("user_id"))
+    jobs = safe_select("job_pool", id=body.get("job_id"))
     if not user or not jobs:
-        return jsonify({"error": "user or job not found"}), 404
-    cover, cv = generate_cv_cover_letter(user, jobs[0])
-    if not cover and not cv:
-        return jsonify({"error": "generation failed — try again"}), 502
-    try:
-        from email_service import send_cv_cover_letter_email
-        send_cv_cover_letter_email(user["email"], user.get("name", ""),
-                                   jobs[0].get("title"), jobs[0].get("company"), cv, cover)
-    except Exception as e:
-        print(f"  ⚠️ CV email: {e}")
-    return jsonify({"cover_letter": cover, "tailored_cv": cv})
+        return jsonify({"error": "not found"}), 404
+    cv_bytes, filename, _ = generate_cv_docx(user, jobs[0])
+    if not cv_bytes:
+        return jsonify({"error": "generation failed"}), 502
+    return send_file(
+        io.BytesIO(cv_bytes),
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        as_attachment=True,
+        download_name=filename or "CV.docx",
+    )
+
+@app.route("/api/download-cover-letter", methods=["POST"])
+def api_download_cover_letter():
+    """Direct file download endpoint for the Cover Letter DOCX."""
+    from flask import send_file
+    from services.cv_generator import generate_cover_letter_docx
+    import io
+    body = request.get_json(silent=True) or {}
+    user = _user(body.get("user_id"))
+    jobs = safe_select("job_pool", id=body.get("job_id"))
+    if not user or not jobs:
+        return jsonify({"error": "not found"}), 404
+    cl_bytes, filename, _ = generate_cover_letter_docx(user, jobs[0])
+    if not cl_bytes:
+        return jsonify({"error": "generation failed"}), 502
+    return send_file(
+        io.BytesIO(cl_bytes),
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        as_attachment=True,
+        download_name=filename or "Cover_Letter.docx",
+    )
 
 @app.route("/api/upload-cv", methods=["POST"])
 def api_upload_cv():

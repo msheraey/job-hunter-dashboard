@@ -10,7 +10,8 @@ from config import get_supabase
 from core.retry import CircuitBreaker
 from core.db import safe_select, safe_update, safe_insert
 from utils.filters import (is_junk, is_nationality_restricted, normalize_title,
-                           validate_title, make_fingerprint, is_gender_restricted)
+                           validate_title, make_fingerprint, is_gender_restricted,
+                           infer_industry)
 from datetime import datetime, timezone, timedelta
 
 live_breaker = CircuitBreaker("dataforseo_live", threshold=3, cooldown=300)
