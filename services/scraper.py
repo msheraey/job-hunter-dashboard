@@ -163,6 +163,8 @@ def save_jobs(keyword, items, log=print):
             "last_scraped": datetime.now(timezone.utc).isoformat(),
             "fingerprint": make_fingerprint(title, company, item.get("location")),
         }
+        from services.classifier import quality_score as _qs
+        row["quality_score"] = _qs(row)
         if safe_insert("job_pool", row, label="job save"):
             existing.add(link)
             saved += 1

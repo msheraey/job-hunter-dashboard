@@ -48,13 +48,17 @@ def _save_matches(user_id, scored_jobs, emailed_flag):
         score = job.get("score", 0) or 0
         if score < 1:
             continue
+        qs = quality_score(job)
+        # Persist quality_score to job_pool so frontend can query it directly
+        if job.get("id") and not job.get("quality_score"):
+            safe_update("job_pool", {"quality_score": qs}, label="quality_score", id=job["id"])
+        job["quality_score"] = qs
         safe_upsert("user_job_matches", {
             "user_id": user_id, "job_id": job["id"], "score": score,
             "match_reason": job.get("match_reason"),
             "emailed": emailed_flag and score >= config.MATCH_THRESHOLD,
         }, on_conflict="user_id,job_id", label="match save")
         if score >= config.MATCH_THRESHOLD:
-            job["quality_score"] = quality_score(job)
             matched.append(job)
     matched.sort(key=lambda x: (x.get("score", 0), x.get("quality_score", 0)), reverse=True)
     return matched
