@@ -79,7 +79,16 @@ def api_analytics():
         jobs = sb.table("job_pool").select("id", count="exact").execute().count or 0
         matches = sb.table("user_job_matches").select("id", count="exact").gte("score", 60).execute().count or 0
         titles = sb.table("title_pool").select("id", count="exact").execute().count or 0
-        return jsonify({"users": users, "jobs_in_pool": jobs, "matches_60plus": matches, "titles": titles})
+        applied = sb.table("user_job_matches").select("id", count="exact").eq("status", "applied").execute().count or 0
+        skipped = sb.table("user_job_matches").select("id", count="exact").eq("status", "skipped").execute().count or 0
+        return jsonify({
+            "users": users,
+            "jobs_in_pool": jobs,
+            "matches_60plus": matches,
+            "titles": titles,
+            "applied_total": applied,
+            "skipped_total": skipped,
+        })
     except Exception as e:
         return jsonify({"error": str(e)[:200]}), 500
 
@@ -150,7 +159,6 @@ def api_add_title():
     if not title_row:
         return jsonify({"error": "could not create title"}), 500
     link_user_title(user_id, title_row)
-    added = [keyword]
     def bg():
         try:
             user = _user(user_id) or {}
@@ -163,7 +171,40 @@ def api_add_title():
         except Exception as e:
             print(f"  ❌ add-title bg: {e}")
     threading.Thread(target=bg, daemon=True).start()
-    return jsonify({"added": added, "expanding": config.SEMANTIC_EXPAND})
+    return jsonify({"added": [keyword], "title_id": title_row["id"], "expanding": config.SEMANTIC_EXPAND})
+
+@app.route("/api/get-titles", methods=["POST"])
+def api_get_titles():
+    """Return the user's tracked titles with metadata and job pool counts."""
+    body = request.get_json(silent=True) or {}
+    user_id = body.get("user_id")
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+    links = safe_select("user_titles", user_id=user_id)
+    if not links:
+        return jsonify({"titles": []})
+    title_ids = [l["title_id"] for l in links]
+    link_map = {l["title_id"]: l["id"] for l in links}
+    try:
+        titles = get_supabase().table("title_pool").select(
+            "id,keyword,normalized,last_scraped").in_("id", title_ids).execute().data or []
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500
+    result = []
+    for t in titles:
+        try:
+            count = get_supabase().table("job_pool").select(
+                "id", count="exact").eq("search_keyword", t["normalized"]).execute().count or 0
+        except Exception:
+            count = 0
+        result.append({
+            "user_title_id": link_map.get(t["id"]),
+            "title_id": t["id"],
+            "keyword": t["keyword"],
+            "last_scraped": t["last_scraped"],
+            "job_count": count,
+        })
+    return jsonify({"titles": result})
 
 @app.route("/api/can-edit-titles", methods=["POST"])
 def api_can_edit_titles():

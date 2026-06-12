@@ -30,3 +30,9 @@ CREATE TABLE IF NOT EXISTS user_linked_accounts (
 -- Notification preferences (pipeline flags live in env; per-user prefs here)
 ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_pref text DEFAULT 'daily';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active timestamptz;
+
+-- quality_score on matches (mirrors job_pool.quality_score; lets frontend query it directly)
+ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS quality_score int;
+
+-- created_at timestamp for analytics (new-today counts, etc.)
+ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
