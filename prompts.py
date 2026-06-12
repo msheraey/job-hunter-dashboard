@@ -4,21 +4,32 @@ Iterate on prompt quality here without touching business logic.
 """
 
 def scoring_prompt(job_title, company, description, user_profile, industries):
-    return f"""You are a job matching expert for the UAE market. Score this job against the candidate and classify the job.
+    return f"""You are a UAE job matching expert. Score this job against the candidate.
 
 JOB:
 Title: {job_title}
 Company: {company}
-Description: {(description or 'Not provided')[:500]}
+Description: {(description or 'Not provided')[:700]}
 
 CANDIDATE:
-{user_profile[:800]}
+{user_profile[:1000]}
 
-Return ONLY JSON (no markdown):
-{{"score": 0-100, "industry": "one of: {industries}", "reason": "why this score, under 15 words", "seniority": "entry/mid/senior/director", "remote": "onsite/hybrid/remote/unknown", "visa_likelihood": "high/medium/low"}}"""
+Scoring guide:
+90-100: Candidate meets ALL core requirements with direct experience
+70-89: Meets most requirements, minor gaps
+50-69: Relevant background but missing key requirements
+30-49: Partial match, significant gaps
+0-29: Poor fit
+
+Return ONLY valid JSON (no markdown):
+{{"score": 0-100, "industry": "one of: {industries}", "reason": "2-3 specific match/gap points referencing both the job requirement AND the candidate evidence, e.g. '8yr GCC sales matches regional mgmt req; FMCG dist. exp aligns with role; missing CRM tool mention'", "seniority": "entry/mid/senior/director", "remote": "onsite/hybrid/remote/unknown", "visa_likelihood": "high/medium/low"}}
+
+The reason field MUST reference specific skills/experience from the job description matched against the candidate's actual background. Never write generic phrases."""
+
 
 def synonym_prompt(title):
     return f"""Generate 3 alternative job titles a UAE job seeker searching "{title}" should also search. Same role, different naming. Return ONLY a JSON array of strings, no markdown. Example: ["title1","title2","title3"]"""
+
 
 def cover_letter_prompt(user_profile, cv_text, job):
     title = job.get('title', '')
@@ -49,17 +60,17 @@ STRICT RULES:
    "I would be a great fit", "passionate about", "dynamic", "leverage my skills", "results-driven",
    "I am pleased to", "further my career", "align with my goals", "strong background"
 6. Total: 180-220 words. Tone matches the company (tech = sharp/data-driven; traditional = professional)
-7. Use "Dear {{company}} Team," if no hiring manager name available
+7. Use "Dear {company} Team," if no hiring manager name available
 
 Return ONLY valid JSON — no markdown, no preamble:
 {{"recipient": "Dear {company} Team,", "para1": "...", "para2": "...", "para3": "...", "closing": "Yours sincerely"}}"""
+
 
 def tailored_cv_prompt(user_profile, cv_text, job, parsed_structure=None):
     title = job.get('title', '')
     company = job.get('company', '')
     description = (job.get('description') or '')[:1200]
 
-    # Build the experience block from parsed structure if available
     exp_block = ""
     exp_count = 0
     if parsed_structure and parsed_structure.get("_raw_experience"):
@@ -73,7 +84,7 @@ def tailored_cv_prompt(user_profile, cv_text, job, parsed_structure=None):
         exp_block = "\n".join(lines)
     else:
         exp_block = (cv_text or '')[:6000]
-        exp_count = cv_text.count("\n") // 8 if cv_text else 0  # rough estimate
+        exp_count = cv_text.count("\n") // 8 if cv_text else 0
 
     return f"""You are an expert ATS-optimised CV writer for the UAE job market.
 Your task is to TAILOR this candidate's CV for a specific role. You are REWRITING, not filtering.
@@ -97,7 +108,7 @@ ABSOLUTE RULES — these are non-negotiable:
 2. INCLUDE all education, certifications, and qualifications exactly as provided — do not drop any.
 3. You may REORDER bullets within a role to put the most job-relevant achievements first.
 4. You may REWRITE bullet text to be stronger and more relevant — but preserve all real facts, numbers, and dates.
-5. Write a tailored Professional Summary (2-3 sentences) highlighting what makes this candidate right for THIS role specifically. If it is a career pivot, frame the transferable skills as a strength.
+5. Write a tailored Professional Summary (2-3 sentences) highlighting what makes this candidate right for THIS role specifically.
 6. Skills section: include keywords from the job description that the candidate genuinely has.
 7. Do NOT invent experience, companies, dates, or qualifications.
 8. UAE-standard format: no photo reference, no nationality, no date of birth.
@@ -133,17 +144,38 @@ Return ONLY valid JSON — no markdown, no preamble, no explanation:
   }}
 }}"""
 
+
 def ats_score_prompt(cv_text, job):
-    return f"""You are an ATS (Applicant Tracking System) analyzer. Compare this CV against the job posting.
+    return f"""You are an ATS (Applicant Tracking System) analyzer. Compare this CV against the job posting and give a detailed breakdown.
 
 JOB: {job.get('title')} at {job.get('company')}
-Description: {(job.get('description') or '')[:1000]}
+Description: {(job.get('description') or '')[:1200]}
 
 CV:
-{(cv_text or '')[:2500]}
+{(cv_text or '')[:3000]}
 
-Return ONLY JSON:
-{{"ats_score": 0-100, "missing_keywords": ["up to 8 keywords from the job missing in the CV"], "strengths": ["3 things the CV does well for this job"], "improvements": ["3 specific changes to raise the score"]}}"""
+ATS score guide:
+90-100 = Excellent — strong keyword match, all requirements met
+70-89  = Good — most requirements met, minor gaps
+50-69  = Fair — some relevant experience but key gaps
+30-49  = Weak — missing several core requirements
+0-29   = Poor — significant mismatch
+
+Return ONLY valid JSON:
+{{
+  "ats_score": 0-100,
+  "label": "Excellent or Good or Fair or Weak or Poor",
+  "score_breakdown": {{
+    "keyword_match": 0-100,
+    "experience_match": 0-100,
+    "skills_match": 0-100,
+    "education_match": 0-100
+  }},
+  "missing_keywords": ["keyword in job description that is absent from the CV — up to 8 items"],
+  "strengths": ["specific thing the CV does well for this exact role — 3 items"],
+  "improvements": ["specific, actionable change that would raise the ATS score — 3 items"]
+}}"""
+
 
 def salary_estimate_prompt(job):
     return f"""Estimate the monthly salary range in AED for this UAE job. Use your knowledge of the UAE market.
@@ -151,9 +183,11 @@ def salary_estimate_prompt(job):
 JOB: {job.get('title')} at {job.get('company')}
 Location: {job.get('location', 'UAE')}
 Description: {(job.get('description') or '')[:600]}
+Listed salary: {job.get('salary', 'Not specified')}
 
-Return ONLY JSON:
+Return ONLY valid JSON:
 {{"min_aed": number, "max_aed": number, "confidence": "high/medium/low", "basis": "one sentence on what this is based on"}}"""
+
 
 def red_flags_prompt(job, search_snippets=""):
     return f"""Analyze this UAE job posting for red flags (scam signals, exploitative terms, vague employers, unrealistic promises, fee requests, commission-only traps).
@@ -163,8 +197,9 @@ Platform: {job.get('platform', '')}
 Description: {(job.get('description') or '')[:1000]}
 {f'WEB CONTEXT: {search_snippets[:800]}' if search_snippets else ''}
 
-Return ONLY JSON:
-{{"risk_level": "low/medium/high", "flags": ["each specific concern found, empty list if clean"], "positives": ["trust signals found"], "advice": "one sentence recommendation"}}"""
+Return ONLY valid JSON:
+{{"risk_level": "low/medium/high", "flags": ["each specific concern found — empty list if clean"], "positives": ["trust signals found"], "advice": "one sentence recommendation"}}"""
+
 
 def interview_prep_prompt(job, user_profile):
     return f"""Generate interview preparation for this UAE job application.
@@ -174,5 +209,67 @@ Description: {(job.get('description') or '')[:800]}
 
 CANDIDATE: {user_profile[:600]}
 
-Return ONLY JSON:
-{{"likely_questions": [{{"q": "question", "approach": "how to answer in one sentence"}}] (6 questions: 2 role-specific, 2 behavioral, 1 salary, 1 culture), "questions_to_ask": ["3 smart questions for the interviewer"], "key_selling_points": ["3 things this candidate should emphasize"]}}"""
+Include exactly 6 likely_questions covering: 2 role-specific technical questions, 2 behavioural STAR-method questions, 1 salary negotiation question, 1 culture/team fit question.
+All questions and answers must be specific to THIS role and company — no generic placeholders.
+
+Return ONLY valid JSON — no markdown, no explanation:
+{{
+  "likely_questions": [
+    {{"q": "specific interview question", "approach": "one-sentence answer strategy tailored to this candidate's background"}}
+  ],
+  "questions_to_ask": [
+    "smart, specific question for the interviewer that shows research into this role",
+    "second smart question",
+    "third smart question"
+  ],
+  "key_selling_points": [
+    "specific strength this candidate has that directly matches this role",
+    "second specific strength",
+    "third specific strength"
+  ]
+}}"""
+
+
+def job_summary_prompt(job):
+    return f"""Summarize this job posting in exactly 3 bullet points. Each bullet must be a concrete, specific fact. Focus on: what the role does day-to-day, what core requirements are needed, and what makes this opportunity notable.
+
+JOB: {job.get('title')} at {job.get('company')}
+Location: {job.get('location', 'UAE')}
+Description: {(job.get('description') or '')[:1200]}
+
+Return ONLY a JSON array of exactly 3 strings — no markdown:
+["bullet describing primary responsibility", "bullet describing key requirements", "bullet describing opportunity or notable aspect"]"""
+
+
+def skills_gap_prompt(missing_keywords_list, target_titles):
+    keywords_text = "\n".join(f"- {kw}" for kw in missing_keywords_list[:40])
+    return f"""Analyze this job seeker's skills gaps based on what is consistently missing across their job applications.
+
+TARGET ROLES: {', '.join(target_titles[:5])}
+
+KEYWORDS MISSING FROM CV (appearing in job requirements):
+{keywords_text}
+
+Return ONLY valid JSON:
+{{
+  "critical_gaps": ["skill or tool missing from 3+ job requirements — top 5 most impactful"],
+  "nice_to_have": ["helpful but not critical skill — top 3"],
+  "quick_wins": ["specific certification or short course that closes a critical gap — top 3"],
+  "estimated_impact": "one sentence on how addressing the top 2 gaps would change match scores"
+}}"""
+
+
+def company_research_prompt(company, job_title):
+    return f"""You are a UAE job market researcher. Provide factual information about this company for a job applicant.
+
+Company: {company}
+Role being applied for: {job_title}
+
+Return ONLY valid JSON:
+{{
+  "overview": "2-sentence company overview from your knowledge",
+  "industry": "industry sector",
+  "uae_presence": "description of UAE operations if known, otherwise 'Information not available'",
+  "culture_notes": "one sentence on culture/work environment if known",
+  "interview_style": "typical interview process for this type of company if known"
+}}"""
