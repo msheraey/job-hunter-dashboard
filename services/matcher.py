@@ -56,6 +56,7 @@ def _save_matches(user_id, scored_jobs, emailed_flag):
         safe_upsert("user_job_matches", {
             "user_id": user_id, "job_id": job["id"], "score": score,
             "match_reason": job.get("match_reason"),
+            "quality_score": qs,
             "emailed": emailed_flag and score >= config.MATCH_THRESHOLD,
         }, on_conflict="user_id,job_id", label="match save")
         if score >= config.MATCH_THRESHOLD:
@@ -126,7 +127,8 @@ def refresh_matches_for_user(user, logger=None):
 
     # Return all stored 60%+ matches, excluding skipped/applied
     try:
-        rows = get_supabase().table("user_job_matches").select("job_id,score,status").eq(
+        rows = get_supabase().table("user_job_matches").select(
+            "job_id,score,status,match_reason,quality_score").eq(
             "user_id", user_id).gte("score", config.MATCH_THRESHOLD).execute().data or []
     except Exception as e:
         print(f"  ⚠️ matches read: {e}")
@@ -135,15 +137,17 @@ def refresh_matches_for_user(user, logger=None):
     if not rows:
         return {"matches": [], "pending_titles": pending}
     ids = [r["job_id"] for r in rows]
-    smap = {r["job_id"]: r["score"] for r in rows}
+    rmap = {r["job_id"]: r for r in rows}
     try:
         jobs = get_supabase().table("job_pool").select("*").in_("id", ids).execute().data or []
     except Exception as e:
         print(f"  ⚠️ jobs read: {e}")
         jobs = []
     for j in jobs:
-        j["score"] = smap.get(j["id"], 0)
-        j["quality_score"] = quality_score(j)
+        r = rmap.get(j["id"], {})
+        j["score"] = r.get("score", 0)
+        j["match_reason"] = r.get("match_reason") or j.get("match_reason")
+        j["quality_score"] = r.get("quality_score") or quality_score(j)
     jobs.sort(key=lambda x: (x.get("score", 0), x.get("quality_score", 0)), reverse=True)
     return {"matches": jobs, "pending_titles": pending}
 
