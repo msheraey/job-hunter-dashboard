@@ -38,10 +38,11 @@ def _load_top_unactioned(user_id, limit=10):
     seen_links, deduped = set(), []
     for j in jobs:
         link = (j.get("link") or "").strip()
-        if link and link in seen_links:
+        if not link:
+            continue  # skip linkless jobs — users can't apply to them
+        if link in seen_links:
             continue
-        if link:
-            seen_links.add(link)
+        seen_links.add(link)
         deduped.append(j)
         if len(deduped) >= limit:
             break

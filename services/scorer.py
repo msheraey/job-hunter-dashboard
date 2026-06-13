@@ -77,7 +77,10 @@ def parse_ai_json(text, title="", description=""):
             gb = data.get("gap_bullets") or []
             if isinstance(mb, list) and mb:
                 match_b = [str(b).strip() for b in mb[:5] if b]
-                gap_b = [str(b).strip() for b in gb[:4] if b] if isinstance(gb, list) else []
+                if not isinstance(gb, list):
+                    print(f"  ⚠️ gap_bullets wrong type ({type(gb).__name__}) — discarding")
+                    gb = []
+                gap_b = [str(b).strip() for b in gb[:4] if b]
                 out["reason"] = json.dumps({"m": match_b, "g": gap_b})
             else:
                 # Legacy plain-string reason
@@ -89,7 +92,10 @@ def parse_ai_json(text, title="", description=""):
         except json.JSONDecodeError:
             pass
     if out["score"] is None:
-        m2 = re.search(r"\b([1-9]?\d|100)\b", cleaned)
+        # Prefer a number explicitly labelled as a score over any arbitrary number
+        m2 = re.search(r'"score"\s*:\s*(\d+)', cleaned)
+        if not m2:
+            m2 = re.search(r'\bscore\b["\s:]*(\d+)', cleaned, re.IGNORECASE)
         if m2:
             out["score"] = max(0, min(100, int(m2.group(1))))
     if not out["industry"] or out["industry"] == "Other":

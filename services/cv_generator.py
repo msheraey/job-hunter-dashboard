@@ -52,14 +52,18 @@ def _validate_and_repair(ai_data, parsed, user):
 
     original_roles = parsed.get("_raw_experience") or []
     ai_roles = ai_data.get("experience") or []
-    ai_companies = {(r.get("company") or "").lower().strip() for r in ai_roles}
+    # Key on (title, company) so two roles at the same company are treated as distinct
+    ai_role_keys = {
+        ((r.get("title") or "").lower().strip(), (r.get("company") or "").lower().strip())
+        for r in ai_roles
+    }
     required = len(original_roles)
     got = len(ai_roles)
     if got < required:
         print(f"  ⚠️ CV repair: AI returned {got}/{required} roles — re-injecting missing")
         for orig in original_roles:
-            co = (orig.get("company") or "").lower().strip()
-            if co and co not in ai_companies:
+            key = ((orig.get("title") or "").lower().strip(), (orig.get("company") or "").lower().strip())
+            if key not in ai_role_keys:
                 ai_roles.append({
                     "title": orig.get("title", ""),
                     "company": orig.get("company", ""),
@@ -68,7 +72,7 @@ def _validate_and_repair(ai_data, parsed, user):
                     "end_date": orig.get("end_date", "Present"),
                     "bullets": orig.get("bullets") or [],
                 })
-                ai_companies.add(co)
+                ai_role_keys.add(key)
         ai_data["experience"] = ai_roles
 
     if not ai_data.get("education") and parsed.get("_raw_education"):

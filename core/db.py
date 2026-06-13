@@ -32,6 +32,9 @@ def safe_upsert(table, row, on_conflict, label=None):
         return False
 
 def safe_update(table, values, label=None, **filters):
+    if not filters:
+        print(f"  ⚠️ safe_update refused: no filters on {table} (would update all rows)")
+        return False
     try:
         q = get_supabase().table(table).update(values)
         for k, v in filters.items():
@@ -43,6 +46,9 @@ def safe_update(table, values, label=None, **filters):
         return False
 
 def safe_delete(table, label=None, **filters):
+    if not filters:
+        print(f"  ⚠️ safe_delete refused: no filters on {table} (would delete all rows)")
+        return False
     try:
         q = get_supabase().table(table).delete()
         for k, v in filters.items():

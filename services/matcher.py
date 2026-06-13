@@ -129,11 +129,11 @@ def refresh_matches_for_user(user, logger=None):
     try:
         rows = get_supabase().table("user_job_matches").select(
             "job_id,score,status,match_reason,quality_score").eq(
-            "user_id", user_id).gte("score", config.MATCH_THRESHOLD).execute().data or []
+            "user_id", user_id).gte("score", config.MATCH_THRESHOLD).eq(
+            "status", "new").execute().data or []
     except Exception as e:
         print(f"  ⚠️ matches read: {e}")
         rows = []
-    rows = [r for r in rows if (r.get("status") or "new") == "new"]
     if not rows:
         return {"matches": [], "pending_titles": pending}
     ids = [r["job_id"] for r in rows]

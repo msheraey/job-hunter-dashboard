@@ -40,7 +40,9 @@ def archive_old_jobs(log=print):
         clean["age_days_at_move"] = job_age_days(job.get("posted_at"))
         clean["moved_at"] = datetime.now(timezone.utc).isoformat()
         if safe_insert("old_jobs", clean, label="archive"):
-            safe_delete("job_pool", id=job["id"])
+            deleted = safe_delete("job_pool", id=job["id"])
+            if not deleted:
+                log(f"  ⚠️ Archive: job {job['id']} inserted to old_jobs but pool delete failed — will retry next run")
             safe_delete("user_job_matches", job_id=job["id"])
             moved += 1
     log(f"📦 Archived {moved} jobs")

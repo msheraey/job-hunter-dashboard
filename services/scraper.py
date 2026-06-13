@@ -136,7 +136,7 @@ def get_cached_jobs(keyword):
 
 def save_jobs(keyword, items, log=print):
     normalized = normalize_title(keyword)
-    existing = {r["link"] for r in safe_select("job_pool", columns="link", search_keyword=normalized)}
+    existing = {r["link"] for r in safe_select("job_pool", columns="link", search_keyword=normalized) if r.get("link")}
     saved = 0
     for item in items:
         title = (item.get("title") or "").strip()
@@ -151,7 +151,7 @@ def save_jobs(keyword, items, log=print):
         raw = item.get("timestamp")
         if raw:
             try:
-                posted_at = datetime.fromisoformat(raw.replace(" +00:00", "+00:00")).isoformat()
+                posted_at = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).isoformat()
             except (ValueError, TypeError):
                 posted_at = None
         row = {

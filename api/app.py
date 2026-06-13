@@ -69,7 +69,9 @@ def api_logs():
 @app.route("/api/logs/<log_id>")
 def api_log_detail(log_id):
     rows = safe_select("scrape_logs", id=log_id)
-    return jsonify(rows[0] if rows else {"error": "not found"})
+    if not rows:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(rows[0])
 
 @app.route("/api/analytics")
 def api_analytics():
@@ -350,13 +352,18 @@ def api_download_cover_letter():
         download_name=filename or "Cover_Letter.docx",
     )
 
+_MAX_CV_BYTES = 5 * 1024 * 1024  # 5 MB
+
 @app.route("/api/upload-cv", methods=["POST"])
 def api_upload_cv():
     user_id = request.form.get("user_id")
     f = request.files.get("file")
     if not user_id or not f:
         return jsonify({"error": "user_id and file required"}), 400
-    result = parse_cv(f.read(), f.filename)
+    data = f.read(_MAX_CV_BYTES + 1)
+    if len(data) > _MAX_CV_BYTES:
+        return jsonify({"error": "File too large (max 5 MB)"}), 413
+    result = parse_cv(data, f.filename)
     if result["error"]:
         return jsonify({"error": result["error"]}), 422
     safe_update("users", {"cv_text": result["text"]}, id=user_id)
@@ -483,8 +490,12 @@ def api_application_board():
 # ── Old jobs ─────────────────────────────────────────────────
 @app.route("/api/old-jobs")
 def api_old_jobs():
-    return jsonify(get_old_jobs(limit=int(request.args.get("limit", 100)),
-                                offset=int(request.args.get("offset", 0))))
+    try:
+        limit = int(request.args.get("limit", 100))
+        offset = int(request.args.get("offset", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "limit and offset must be integers"}), 400
+    return jsonify(get_old_jobs(limit=limit, offset=offset))
 
 @app.route("/api/restore-job", methods=["POST"])
 def api_restore_job():

@@ -26,11 +26,11 @@ def run_daily():
         for k, v in health.items():
             if isinstance(v, dict):
                 logger.add(f"  {'🟢' if v['ok'] else '🔴'} {k}: {v['msg']}")
-        if not health["all_ok"]:
+        if not health.get("all_ok"):
             logger.add("❌ Core dependency down (supabase/dataforseo) — aborting run")
             logger.finish(success=False, error="self-test failed")
             return
-        if not health["scoring_ok"]:
+        if not health.get("scoring_ok"):
             logger.add("❌ No scoring provider available — aborting run")
             logger.finish(success=False, error="no scoring provider")
             return
