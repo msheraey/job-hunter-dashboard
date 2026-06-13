@@ -5,12 +5,31 @@ skipped/applied jobs never re-emailed, quality score attached to matches.
 """
 import threading
 import config
+from collections import Counter
+from datetime import datetime, timezone, timedelta
 from config import get_supabase
 from core.db import safe_select, safe_upsert, safe_update
 from services.scraper import search_jobs
 from services.scorer import score_jobs_for_user
 from services.classifier import quality_score
 from utils.filters import is_gender_restricted
+
+def _infer_user_industry(user_id):
+    """Derive user's primary industry from their highest-scoring matches (≥70)."""
+    try:
+        rows = get_supabase().table("user_job_matches").select(
+            "job_id").eq("user_id", user_id).gte("score", 70).limit(60).execute().data or []
+        if not rows:
+            return None
+        ids = [r["job_id"] for r in rows]
+        jobs = get_supabase().table("job_pool").select("industry").in_("id", ids).execute().data or []
+        industries = [j["industry"] for j in jobs if j.get("industry") and j["industry"] != "Other"]
+        if not industries:
+            return None
+        return Counter(industries).most_common(1)[0][0]
+    except Exception:
+        return None
+
 
 def _user_titles(user_id):
     links = safe_select("user_titles", columns="title_id", user_id=user_id)
@@ -97,12 +116,27 @@ def refresh_matches_for_user(user, logger=None):
     if not titles:
         return {"matches": [], "pending_titles": []}
     scored_ids = _already_scored(user_id)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=config.JOB_MAX_DAYS)
     pending, to_score = [], []
     for t in titles:
-        pooled = safe_select("job_pool", search_keyword=t["normalized"])
-        if not pooled:
+        all_pooled = safe_select("job_pool", search_keyword=t["normalized"])
+        if not all_pooled:
             pending.append(t["keyword"])
             continue
+        # Enforce same date cutoff as search_jobs() — exclude stale but keep undated
+        pooled = []
+        for pj in all_pooled:
+            p = pj.get("posted_at")
+            if p:
+                try:
+                    pd = datetime.fromisoformat(str(p).replace("Z", "+00:00"))
+                    if pd.tzinfo is None:
+                        pd = pd.replace(tzinfo=timezone.utc)
+                    if pd < cutoff:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            pooled.append(pj)
         for j in pooled:
             if gender and gender != "prefer_not_to_say" and is_gender_restricted(
                     f"{j.get('title','')} {j.get('description','')}", gender):
@@ -159,7 +193,15 @@ def refresh_matches_for_user(user, logger=None):
         if link:
             seen_links.add(link)
         deduped.append(j)
-    return {"matches": deduped, "pending_titles": pending}
+
+    # Tag each match as industry-specific or cross-industry
+    user_industry = _infer_user_industry(user_id)
+    for j in deduped:
+        j["industry_match"] = bool(
+            user_industry and j.get("industry") and j["industry"] == user_industry
+        )
+
+    return {"matches": deduped, "pending_titles": pending, "user_industry": user_industry}
 
 def set_job_status(user_id, job_id, status):
     """Update job status. Accepted: new | skipped | applied | interview | offer | rejected."""

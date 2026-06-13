@@ -178,7 +178,7 @@ def score_job(job, user_profile):
     prompt = prompts.scoring_prompt(
         job.get("title", ""), job.get("company", ""),
         job.get("description", ""), user_profile, ", ".join(config.INDUSTRY_LIST))
-    text = ai_complete(prompt, label="scoring", max_tokens=450)
+    text = ai_complete(prompt, label="scoring", max_tokens=600)
     return parse_ai_json(text, title=job.get("title", ""), description=job.get("description", ""))
 
 
@@ -204,8 +204,13 @@ def score_jobs_for_user(jobs, user):
         result = score_job(job, user_profile)
         job["score"] = result["score"] if isinstance(result["score"], int) else 0
         job["match_reason"] = result["reason"]
-        if job.get("id") and result["industry"] and not job.get("industry"):
-            enrich = {"industry": result["industry"]}
+        ai_industry = result.get("industry")
+        should_enrich = (
+            job.get("id") and ai_industry and ai_industry != "Other"
+            and ai_industry != job.get("industry")  # always overwrite if AI has a better value
+        )
+        if should_enrich:
+            enrich = {"industry": ai_industry}
             if result.get("seniority"):
                 enrich["seniority"] = result["seniority"]
             if result.get("remote"):
@@ -214,6 +219,18 @@ def score_jobs_for_user(jobs, user):
                 enrich["visa_likelihood"] = result["visa_likelihood"]
             safe_update("job_pool", enrich, label="enrich", id=job["id"])
             job.update(enrich)
+        elif job.get("id") and result.get("seniority") and not job.get("seniority"):
+            # Still write seniority/remote/visa even if industry already set
+            partial = {}
+            if result.get("seniority") and not job.get("seniority"):
+                partial["seniority"] = result["seniority"]
+            if result.get("remote") and not job.get("remote_status"):
+                partial["remote_status"] = result["remote"]
+            if result.get("visa_likelihood") and not job.get("visa_likelihood"):
+                partial["visa_likelihood"] = result["visa_likelihood"]
+            if partial:
+                safe_update("job_pool", partial, label="enrich_partial", id=job["id"])
+                job.update(partial)
     for job in jobs[config.MAX_JOBS_PER_USER:]:
         job["score"] = 0
     return jobs
