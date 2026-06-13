@@ -3,6 +3,7 @@ config.py — Single source of truth: env vars, constants, feature flags.
 Every other module imports from here. No credentials anywhere else.
 """
 import os
+import threading
 from supabase import create_client
 
 # ── Credentials ──────────────────────────────────────────────
@@ -48,15 +49,18 @@ INDUSTRY_LIST = [
 
 REQUIRED_ENV = ["DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD", "SUPABASE_URL", "SUPABASE_SERVICE_KEY"]
 
-# ── Supabase client (lazy singleton) ─────────────────────────
+# ── Supabase client (thread-safe lazy singleton) ─────────────
 _supabase = None
+_supabase_lock = threading.Lock()
 
 def get_supabase():
     global _supabase
     if _supabase is None:
-        if not SUPABASE_URL or not SUPABASE_KEY:
-            raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_KEY not set")
-        _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        with _supabase_lock:
+            if _supabase is None:
+                if not SUPABASE_URL or not SUPABASE_KEY:
+                    raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_KEY not set")
+                _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _supabase
 
 def validate_env():

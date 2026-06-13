@@ -19,13 +19,25 @@ gemini_breaker = CircuitBreaker("gemini", threshold=4, cooldown=120)
 haiku_breaker  = CircuitBreaker("haiku",  threshold=4, cooldown=180)
 
 INDUSTRY_MAP = {
-    "health": "Healthcare & Pharmacy", "pharma": "Healthcare & Pharmacy", "medical": "Healthcare & Pharmacy",
-    "retail": "Retail", "fmcg": "FMCG", "logistic": "Logistics & Supply Chain", "supply": "Logistics & Supply Chain",
-    "tech": "Technology", "finance": "Finance & Banking", "bank": "Finance & Banking",
-    "hospital": "Hospitality & Tourism", "tourism": "Hospitality & Tourism", "real estate": "Real Estate",
-    "auto": "Automotive", "education": "Education", "construction": "Construction & Engineering",
-    "engineer": "Construction & Engineering", "media": "Media & Marketing", "market": "Media & Marketing",
-    "hr": "HR & Recruitment", "recruit": "HR & Recruitment",
+    # Longer/more specific keys listed first for readability; map_industry uses longest-key-wins
+    "supermarket": "Retail", "grocery": "Retail",
+    "healthcare": "Healthcare & Pharmacy", "pharmaceutical": "Healthcare & Pharmacy",
+    "pharmacy": "Healthcare & Pharmacy", "pharma": "Healthcare & Pharmacy",
+    "medical": "Healthcare & Pharmacy", "health": "Healthcare & Pharmacy",
+    "hospitality": "Hospitality & Tourism", "tourism": "Hospitality & Tourism",
+    "hotel": "Hospitality & Tourism", "restaurant": "Hospitality & Tourism",
+    "retail": "Retail", "fmcg": "FMCG", "consumer goods": "FMCG",
+    "logistics": "Logistics & Supply Chain", "supply chain": "Logistics & Supply Chain",
+    "logistic": "Logistics & Supply Chain", "supply": "Logistics & Supply Chain",
+    "technology": "Technology", "software": "Technology", "tech": "Technology",
+    "banking": "Finance & Banking", "finance": "Finance & Banking", "fintech": "Finance & Banking",
+    "real estate": "Real Estate", "property management": "Real Estate",
+    "automotive": "Automotive", "dealership": "Automotive",
+    "education": "Education",
+    "construction": "Construction & Engineering", "engineering": "Construction & Engineering",
+    "engineer": "Construction & Engineering",
+    "marketing": "Media & Marketing", "advertising": "Media & Marketing", "media": "Media & Marketing",
+    "recruitment": "HR & Recruitment", "human resources": "HR & Recruitment", "hr": "HR & Recruitment",
 }
 
 def map_industry(text):
@@ -34,10 +46,12 @@ def map_industry(text):
     t = text.lower()
     if text in config.INDUSTRY_LIST:
         return text
+    # Longest-key-wins: more specific/multi-word keys beat short ambiguous ones
+    best, best_len = None, 0
     for k, v in INDUSTRY_MAP.items():
-        if k in t:
-            return v
-    return "Other"
+        if k in t and len(k) > best_len:
+            best, best_len = v, len(k)
+    return best or "Other"
 
 def parse_ai_json(text, title="", description=""):
     """Extract the result dict from an AI response. Defensive against markdown fences."""
@@ -58,15 +72,30 @@ def parse_ai_json(text, title="", description=""):
                 except (ValueError, TypeError):
                     pass
             out["industry"] = map_industry(data.get("industry"))
-            r = data.get("reason")
-            out["reason"] = str(r).strip()[:220] if r else None
+            # New bullet format: match_bullets + gap_bullets
+            mb = data.get("match_bullets") or []
+            gb = data.get("gap_bullets") or []
+            if isinstance(mb, list) and mb:
+                match_b = [str(b).strip() for b in mb[:5] if b]
+                if not isinstance(gb, list):
+                    print(f"  ⚠️ gap_bullets wrong type ({type(gb).__name__}) — discarding")
+                    gb = []
+                gap_b = [str(b).strip() for b in gb[:4] if b]
+                out["reason"] = json.dumps({"m": match_b, "g": gap_b})
+            else:
+                # Legacy plain-string reason
+                r = data.get("reason")
+                out["reason"] = str(r).strip()[:300] if r else None
             out["seniority"] = data.get("seniority")
             out["remote"] = data.get("remote")
             out["visa_likelihood"] = data.get("visa_likelihood")
         except json.JSONDecodeError:
             pass
     if out["score"] is None:
-        m2 = re.search(r"\b([1-9]?\d|100)\b", cleaned)
+        # Prefer a number explicitly labelled as a score over any arbitrary number
+        m2 = re.search(r'"score"\s*:\s*(\d+)', cleaned)
+        if not m2:
+            m2 = re.search(r'\bscore\b["\s:]*(\d+)', cleaned, re.IGNORECASE)
         if m2:
             out["score"] = max(0, min(100, int(m2.group(1))))
     if not out["industry"] or out["industry"] == "Other":
@@ -149,7 +178,7 @@ def score_job(job, user_profile):
     prompt = prompts.scoring_prompt(
         job.get("title", ""), job.get("company", ""),
         job.get("description", ""), user_profile, ", ".join(config.INDUSTRY_LIST))
-    text = ai_complete(prompt, label="scoring", max_tokens=250)
+    text = ai_complete(prompt, label="scoring", max_tokens=450)
     return parse_ai_json(text, title=job.get("title", ""), description=job.get("description", ""))
 
 

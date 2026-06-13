@@ -35,6 +35,7 @@ def quality_score(job):
         s += 15
     elif any(x in platform for x in ("bayt", "indeed", "gulftalent", "naukrigulf")):
         s += 10
-    if (job.get("company") or "Unknown") != "Unknown":
+    company = (job.get("company") or "").strip()
+    if company and company.lower() != "unknown":
         s += 10
     return min(100, s)

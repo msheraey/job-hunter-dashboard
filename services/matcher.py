@@ -129,11 +129,11 @@ def refresh_matches_for_user(user, logger=None):
     try:
         rows = get_supabase().table("user_job_matches").select(
             "job_id,score,status,match_reason,quality_score").eq(
-            "user_id", user_id).gte("score", config.MATCH_THRESHOLD).execute().data or []
+            "user_id", user_id).gte("score", config.MATCH_THRESHOLD).eq(
+            "status", "new").execute().data or []
     except Exception as e:
         print(f"  ⚠️ matches read: {e}")
         rows = []
-    rows = [r for r in rows if (r.get("status") or "new") == "new"]
     if not rows:
         return {"matches": [], "pending_titles": pending}
     ids = [r["job_id"] for r in rows]
@@ -150,7 +150,16 @@ def refresh_matches_for_user(user, logger=None):
         j["match_reason"] = r.get("match_reason") or j.get("match_reason")
         j["quality_score"] = r.get("quality_score") or quality_score(j)
     jobs.sort(key=lambda x: (x.get("score", 0), x.get("quality_score", 0)), reverse=True)
-    return {"matches": jobs, "pending_titles": pending}
+    # Deduplicate by link — same job may be scraped from multiple platforms
+    seen_links, deduped = set(), []
+    for j in jobs:
+        link = (j.get("link") or "").strip()
+        if link and link in seen_links:
+            continue
+        if link:
+            seen_links.add(link)
+        deduped.append(j)
+    return {"matches": deduped, "pending_titles": pending}
 
 def set_job_status(user_id, job_id, status):
     """Update job status. Accepted: new | skipped | applied | interview | offer | rejected."""
