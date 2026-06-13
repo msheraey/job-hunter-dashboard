@@ -14,7 +14,7 @@ from core.selftest import run_all as selftest_all
 from core.logger import RunLogger
 from services.scraper import run_full_scrape, search_jobs
 from services.matcher import (search_and_score_for_user, refresh_matches_for_user,
-                              set_job_status)
+                              set_job_status, update_match_notes)
 from services.archiver import archive_old_jobs, get_old_jobs
 from services.cv_generator import generate_cv_cover_letter
 from services.cv_parser import parse_cv
@@ -145,9 +145,36 @@ def api_refresh_matches():
 
 @app.route("/api/job-status", methods=["POST"])
 def api_job_status():
+    """Update job status. Accepted: new | skipped | applied | interview | offer | rejected."""
     body = request.get_json(silent=True) or {}
     ok = set_job_status(body.get("user_id"), body.get("job_id"), body.get("status"))
     return jsonify({"ok": ok}), (200 if ok else 400)
+
+
+@app.route("/api/update-match-notes", methods=["POST"])
+def api_update_match_notes():
+    """Save free-text notes against a job match (recruiter name, follow-up, etc.)."""
+    body = request.get_json(silent=True) or {}
+    ok = update_match_notes(body.get("user_id"), body.get("job_id"),
+                            (body.get("notes") or "")[:2000])
+    return jsonify({"ok": ok}), (200 if ok else 400)
+
+
+@app.route("/api/set-interview-date", methods=["POST"])
+def api_set_interview_date():
+    """Set or clear the interview date for a job match."""
+    from core.db import safe_upsert
+    body = request.get_json(silent=True) or {}
+    user_id = body.get("user_id")
+    job_id = body.get("job_id")
+    interview_date = body.get("interview_date")  # ISO string or null
+    if not user_id or not job_id:
+        return jsonify({"error": "user_id and job_id required"}), 400
+    ok = safe_upsert("user_job_matches",
+                     {"user_id": user_id, "job_id": job_id,
+                      "interview_date": interview_date},
+                     on_conflict="user_id,job_id", label="interview_date")
+    return jsonify({"ok": ok})
 
 @app.route("/api/add-title", methods=["POST"])
 def api_add_title():
@@ -242,11 +269,15 @@ def api_generate_cv():
     if not user.get("cv_text") and not user.get("profile_summary"):
         return jsonify({"error": "Please add your profile summary or upload your CV first"}), 422
 
-    from services.cv_generator import generate_cover_letter_docx, generate_cv_docx
-    import base64
+    try:
+        from services.cv_generator import generate_cover_letter_docx, generate_cv_docx
+        import base64
 
-    cl_bytes, cl_file, cl_plain = generate_cover_letter_docx(user, jobs[0])
-    cv_bytes, cv_file, cv_plain = generate_cv_docx(user, jobs[0])
+        cl_bytes, cl_file, cl_plain = generate_cover_letter_docx(user, jobs[0])
+        cv_bytes, cv_file, cv_plain = generate_cv_docx(user, jobs[0])
+    except Exception as e:
+        print(f"  ❌ generate-cv exception: {e}")
+        return jsonify({"error": f"Generation failed: {str(e)[:120]}"}), 500
 
     if not cl_bytes and not cv_bytes:
         return jsonify({"error": "Generation failed — all AI providers unavailable, try again"}), 502
@@ -329,7 +360,20 @@ def api_upload_cv():
     if result["error"]:
         return jsonify({"error": result["error"]}), 422
     safe_update("users", {"cv_text": result["text"]}, id=user_id)
-    return jsonify({"ok": True, "name_detected": result["name"], "chars": len(result["text"])})
+    # Clear unactioned matches so they get re-scored against the new CV
+    def _clear_unactioned():
+        try:
+            rows = get_supabase().table("user_job_matches").select(
+                "id").eq("user_id", user_id).eq("status", "new").execute().data or []
+            if rows:
+                ids = [r["id"] for r in rows]
+                get_supabase().table("user_job_matches").delete().in_("id", ids).execute()
+                print(f"  ♻️  CV updated — cleared {len(ids)} unactioned matches for re-score")
+        except Exception as e:
+            print(f"  ⚠️ clear-on-cv-update: {e}")
+    threading.Thread(target=_clear_unactioned, daemon=True).start()
+    return jsonify({"ok": True, "name_detected": result["name"],
+                    "chars": len(result["text"]), "rescoring": True})
 
 # ── Premium intelligence ─────────────────────────────────────
 def _premium_ctx():
@@ -372,6 +416,69 @@ def api_company():
     if not job:
         return jsonify({"error": "job not found"}), 404
     return jsonify(premium.company_info(job))
+
+@app.route("/api/job-summary", methods=["POST"])
+def api_job_summary():
+    """3-bullet AI summary of a job posting. Cached in job_pool."""
+    _, job = _premium_ctx()
+    if not job:
+        return jsonify({"error": "job not found"}), 404
+    return jsonify(premium.job_summary(job))
+
+@app.route("/api/skills-gap", methods=["POST"])
+def api_skills_gap():
+    """Cross-job skills gap analysis for the user."""
+    body = request.get_json(silent=True) or {}
+    user = _user(body.get("user_id"))
+    if not user:
+        return jsonify({"error": "user not found"}), 404
+    # Collect user's tracked title keywords
+    from services.matcher import _user_titles
+    titles = _user_titles(user["id"])
+    title_keywords = [t["keyword"] for t in titles]
+    return jsonify(premium.skills_gap(user["id"], title_keywords))
+
+# ── Application board (Kanban) ────────────────────────────────
+@app.route("/api/application-board", methods=["POST"])
+def api_application_board():
+    """Return all user matches grouped by status for the Kanban board."""
+    body = request.get_json(silent=True) or {}
+    user = _user(body.get("user_id"))
+    if not user:
+        return jsonify({"error": "user not found"}), 404
+    try:
+        rows = get_supabase().table("user_job_matches").select(
+            "job_id,score,status,match_reason,quality_score,notes,interview_date"
+        ).eq("user_id", user["id"]).gte("score", config.MATCH_THRESHOLD).execute().data or []
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500
+    if not rows:
+        return jsonify({"board": {"new": [], "applied": [], "interview": [],
+                                   "offer": [], "rejected": [], "skipped": []}})
+    ids = [r["job_id"] for r in rows]
+    rmap = {r["job_id"]: r for r in rows}
+    try:
+        jobs = get_supabase().table("job_pool").select(
+            "id,title,company,location,posted_at,link,platform,salary,"
+            "salary_min_aed,salary_max_aed,industry,seniority,remote_status,visa_likelihood"
+        ).in_("id", ids).execute().data or []
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500
+    board = {"new": [], "applied": [], "interview": [],
+             "offer": [], "rejected": [], "skipped": []}
+    for j in jobs:
+        r = rmap.get(j["id"], {})
+        j["score"] = r.get("score", 0)
+        j["status"] = r.get("status", "new")
+        j["match_reason"] = r.get("match_reason")
+        j["quality_score"] = r.get("quality_score", 0)
+        j["notes"] = r.get("notes")
+        j["interview_date"] = r.get("interview_date")
+        bucket = j["status"] if j["status"] in board else "new"
+        board[bucket].append(j)
+    for bucket in board:
+        board[bucket].sort(key=lambda x: x.get("score", 0), reverse=True)
+    return jsonify({"board": board})
 
 # ── Old jobs ─────────────────────────────────────────────────
 @app.route("/api/old-jobs")

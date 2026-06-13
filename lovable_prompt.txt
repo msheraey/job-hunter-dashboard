@@ -1,426 +1,400 @@
 ================================================================================
-JOBHUNTER DASHBOARD — COMPLETE LOVABLE PROMPT
-Fix the dashboard error + implement all pending features
+JOBHUNTER — LOVABLE PROMPT v3
+Complete frontend specification: bug fixes + all features
 ================================================================================
 
 ────────────────────────────────────────────────────────────────────────────────
-PART 1 — FIX THE DASHBOARD ERROR (DO THIS FIRST)
+PART 1 — CRITICAL FIXES (DO THESE FIRST)
 ────────────────────────────────────────────────────────────────────────────────
 
-The dashboard shows: "Couldn't load your matches — column
-user_job_matches.quality_score does not exist"
+FIX 1 — JOBS DISAPPEARING WHEN NAVIGATING AWAY
+The dashboard fetches jobs on mount. When the user navigates to Settings and
+back, the component unmounts and the jobs array resets to empty, causing a
+flash of "no matches" before re-loading.
 
-Root cause: the frontend is querying the Supabase `user_job_matches` table
-directly and asking for a `quality_score` column that did not exist there.
-The backend has now been fixed — `quality_score` is now a real column on
-`user_job_matches` AND the API endpoint returns it correctly.
+Fix: Cache the matches in a global store (Zustand or React Query) so:
+  • Data shows immediately from cache on return to dashboard
+  • Refresh happens in the background (stale-while-revalidate pattern)
+  • Never show empty state if cached data exists
 
-WHAT TO CHANGE IN THE FRONTEND:
+Implementation:
+  - If using React Query:  staleTime: 5 * 60 * 1000, placeholderData: keepPreviousData
+  - If using Zustand:      store matchesData + lastFetched, show stored data instantly
+  - Also persist to localStorage so data survives page refresh
+  - Show a subtle "Updating..." spinner (NOT a full blank state) during re-fetch
 
-1. The primary data source for the matches list MUST be the backend API, not a
-   direct Supabase query on `user_job_matches`. Replace any direct Supabase
-   query for job matches with a call to:
+FIX 2 — DATA SOURCE FOR MATCHES
+Use the backend API exclusively (not direct Supabase queries) for the matches
+list. The backend already returns all required fields including quality_score,
+match_reason, and status:
 
-     POST /api/refresh-matches
-     Body: { "user_id": "<current user's uuid>" }
+  POST /api/refresh-matches
+  Body: { "user_id": "<user uuid>" }
+  Returns: { "matches": Job[], "pending_titles": string[] }
 
-   Call this on page load and when the user hits Refresh.
+If you still do any direct Supabase queries, this select now works:
+  supabase.from('user_job_matches')
+    .select('job_id, score, status, match_reason, quality_score, notes, interview_date')
 
-2. The full response shape from /api/refresh-matches is:
-
-   {
-     "matches": [
-       {
-         // identity
-         "id": "uuid",
-         "title": "Area Sales Manager - GCC",
-         "company": "established search",
-         "location": "United Arab Emirates",
-         "posted_at": "2026-06-10T09:00:00+00:00",
-         "link": "https://...",
-         "platform": "Indeed",   // LinkedIn | Indeed | Bayt | Naukrigulf | GulfTalent | other
-         "salary": "AED 15,000–20,000",  // raw text, may be null
-
-         // AI scores (from this user's match)
-         "score": 90,            // AI match score 0–100 (only 60+ returned)
-         "quality_score": 75,    // listing quality 0–100 (salary+desc+recency+platform)
-         "match_reason": "Strong alignment with GCC territory management and FMCG background.",
-         "status": "new",        // always "new" in this response
-
-         // job classification (may be null if job not yet enriched)
-         "industry": "Retail",
-         "seniority": "senior",         // entry | mid | senior | director | null
-         "remote_status": "onsite",     // onsite | hybrid | remote | unknown
-         "visa_likelihood": "high",     // high | medium | low | null
-
-         // raw content
-         "description": "...",
-         "fingerprint": "...",
-         "search_keyword": "sales manager uae",
-         "last_scraped": "2026-06-10T..."
-       }
-     ],
-     "pending_titles": ["Sales Director"]  // titles still being scraped; may be empty
-   }
-
-3. If you still need to query Supabase directly for any reason (e.g. real-time
-   status updates), use this select string — it now works:
-
-     supabase.from('user_job_matches')
-       .select('job_id, score, status, match_reason, quality_score')
-       .eq('user_id', userId)
-       .gte('score', 60)
-       .eq('status', 'new')
-
-   Then join to job_pool separately to get the job details.
+FIX 3 — SUPABASE MIGRATION (run in SQL Editor BEFORE next deploy)
+  ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS quality_score int;
+  ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
+  ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS interview_date timestamptz;
+  ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS notes text;
+  ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS salary_min_aed int;
+  ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS salary_max_aed int;
+  ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS summary_bullets text;
+  ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS link_active boolean DEFAULT true;
 
 ────────────────────────────────────────────────────────────────────────────────
 PART 2 — COMPLETE API REFERENCE
 ────────────────────────────────────────────────────────────────────────────────
 
-All endpoints are on the backend base URL. All POST bodies are JSON.
-All responses are JSON.
+BASE URL: https://[your-backend]/
 
 ── MATCHES ─────────────────────────────────────────────────────────────────────
 
 POST /api/refresh-matches
   Body:    { "user_id": string }
   Returns: { "matches": Job[], "pending_titles": string[] }
-  Use:     Load / refresh the dashboard matches list.
-           Call on mount and on manual refresh.
-           pending_titles is non-empty when a title has no scraped jobs yet —
-           show a loading banner for those titles.
+  Notes:   - pending_titles = titles still being scraped (show loading banner)
+           - Only returns status="new" jobs (60%+ score)
+           - Call on dashboard mount; cache result
 
 POST /api/job-status
-  Body:    { "user_id": string, "job_id": string, "status": "new" | "skipped" | "applied" }
+  Body:    { "user_id": string, "job_id": string,
+             "status": "new" | "skipped" | "applied" | "interview" | "offer" | "rejected" }
   Returns: { "ok": true }
-  Use:     Skip button → status: "skipped"
-           Applied button → status: "applied"
-           Undo → status: "new"
-  Note:    After calling this, remove the card from the visible list
-           (the job will no longer appear in refresh-matches for that status).
+
+POST /api/update-match-notes
+  Body:    { "user_id": string, "job_id": string, "notes": string (max 2000 chars) }
+  Returns: { "ok": true }
+  Use:     Recruiter name, follow-up date, anything the user wants to remember
+
+POST /api/set-interview-date
+  Body:    { "user_id": string, "job_id": string, "interview_date": "ISO string or null" }
+  Returns: { "ok": true }
+
+POST /api/application-board
+  Body:    { "user_id": string }
+  Returns: { "board": { "new": Job[], "applied": Job[], "interview": Job[],
+                         "offer": Job[], "rejected": Job[], "skipped": Job[] } }
+  Use:     The Kanban application tracking board (see Part 5)
+  Notes:   Jobs include notes and interview_date fields
 
 ── TITLES ───────────────────────────────────────────────────────────────────────
 
 POST /api/get-titles
   Body:    { "user_id": string }
-  Returns: {
-             "titles": [
-               {
-                 "user_title_id": string,   // use this for delete
-                 "title_id": string,
-                 "keyword": string,          // e.g. "Sales Manager"
-                 "last_scraped": string,     // ISO timestamp or null
-                 "job_count": number         // jobs in pool for this title
-               }
-             ]
-           }
-  Use:     Settings page title list. Shows job counts and last-scraped time.
+  Returns: { "titles": [{ "user_title_id": string, "title_id": string,
+                           "keyword": string, "last_scraped": string,
+                           "job_count": number }] }
 
 POST /api/add-title
   Body:    { "user_id": string, "title": string }
-  Returns: { "added": ["Sales Manager"], "title_id": "uuid", "expanding": true }
-  Note:    "expanding": true means the backend is auto-generating synonym titles
-           in the background (e.g. "Sales Manager" → also tracks "Business
-           Development Manager", "Account Manager", etc.)
-           Scraping starts in the background immediately.
-           Call /api/get-titles after a short delay to see the updated list.
+  Returns: { "added": [string], "title_id": string, "expanding": bool }
 
 POST /api/can-edit-titles
   Body:    { "user_id": string }
-  Returns: { "can_add": true, "count": 3, "max": 10 }
-  Use:     Disable the "Add title" button when count >= max.
+  Returns: { "can_add": bool, "count": number, "max": 10 }
 
 POST /api/delete-title
-  Body:    { "user_id": string, "title_id": string }
+  Body:    { "user_id": string, "title_id": string }  ← use user_title_id here
   Returns: { "ok": true }
-  Note:    Pass user_title_id from /api/get-titles as title_id.
 
 ── CV & DOCUMENTS ───────────────────────────────────────────────────────────────
 
 POST /api/upload-cv
-  Body:    multipart/form-data — fields: user_id (string), file (PDF/DOCX/TXT)
-  Returns: { "ok": true, "name_detected": "Mohammed Al-Rashidi", "chars": 4521 }
-  Errors:  422 if file is unreadable or scanned image without text layer
+  Body:    multipart/form-data — fields: user_id, file (PDF/DOCX/TXT)
+  Returns: { "ok": true, "name_detected": string, "chars": number, "rescoring": true }
+  Note:    Uploading a new CV automatically clears old unactioned matches so
+           they get re-scored against the updated CV.
 
 POST /api/generate-cv
   Body:    { "user_id": string, "job_id": string }
-  Returns: {
-             "cover_letter": string,       // plain text cover letter
-             "tailored_cv": string,        // plain text tailored CV
-             "cover_letter_ok": true,
-             "tailored_cv_ok": true,
-             "cl_docx_b64": string,        // base64-encoded DOCX for download
-             "cv_docx_b64": string,        // base64-encoded DOCX for download
-             "cl_filename": "Cover_Letter_JobTitle_Company.docx",
-             "cv_filename": "CV_JobTitle_Company.docx",
-             "job_title": "Area Sales Manager",
-             "company": "established search"
-           }
-  Note:    Also emails the documents to the user in the background.
-  Errors:  422 if user has no CV or profile summary uploaded yet
-           502 if all AI providers unavailable
+  Returns: { "cover_letter": string, "tailored_cv": string,
+             "cover_letter_ok": bool, "tailored_cv_ok": bool,
+             "cl_docx_b64": string, "cv_docx_b64": string,
+             "cl_filename": string, "cv_filename": string,
+             "job_title": string, "company": string }
+  Note:    Offer both "Download DOCX" and "Preview text" options in UI.
+           The DOCX version is ATS-optimised with proper fonts/formatting.
 
 POST /api/download-cv
   Body:    { "user_id": string, "job_id": string }
-  Returns: DOCX file stream (direct download)
+  Returns: DOCX file stream
 
 POST /api/download-cover-letter
   Body:    { "user_id": string, "job_id": string }
-  Returns: DOCX file stream (direct download)
+  Returns: DOCX file stream
 
-── PREMIUM INTELLIGENCE (shown inside "Job Intelligence" accordion) ─────────────
+── PREMIUM INTELLIGENCE ─────────────────────────────────────────────────────────
 
-All premium endpoints take { "user_id": string, "job_id": string }
+All take { "user_id": string, "job_id": string } unless noted.
 
 POST /api/premium/ats-score
-  Returns: {
-             "ats_score": 72,
-             "missing_keywords": ["logistics", "P&L management"],
-             "strengths": ["GCC experience", "team leadership"],
-             "improvements": ["Add quantified revenue figures", "Mention CRM tools"]
-           }
+  Returns: { "ats_score": 0-100, "label": "Excellent|Good|Fair|Weak|Poor",
+             "score_breakdown": { "keyword_match": 0-100, "experience_match": 0-100,
+                                   "skills_match": 0-100, "education_match": 0-100 },
+             "missing_keywords": string[], "strengths": string[],
+             "improvements": string[] }
+  Display: Show label prominently (colour-coded), breakdown as 4 progress bars,
+           then the 3 lists below.
 
 POST /api/premium/salary
-  Returns: {
-             "min_aed": 18000,
-             "max_aed": 25000,
-             "confidence": "medium",
-             "basis": "UAE market rate for senior sales roles in FMCG"
-           }
+  Returns: { "min_aed": number, "max_aed": number,
+             "confidence": "high|medium|low", "basis": string }
+  Display: "AED 18,000 – 25,000 / month" with confidence badge.
 
 POST /api/premium/red-flags
-  Returns: {
-             "risk_level": "low",   // low | medium | high
-             "flags": ["Vague compensation description"],
-             "positives": ["Established company", "Clear reporting structure"],
-             "advice": "Ask about OTE and commission structure in the interview.",
-             "live_search_used": true
-           }
+  Returns: { "risk_level": "low|medium|high", "flags": string[],
+             "positives": string[], "advice": string, "live_search_used": bool }
+  Display: Colour-coded risk badge (green/amber/red), then lists.
 
 POST /api/premium/interview-prep
-  Returns: {
-             "likely_questions": [
-               "Describe a time you managed a distributed GCC sales team.",
-               "What CRM tools have you used to track pipeline?"
-             ],
-             "questions_to_ask": [
-               "What does the first 90 days look like for this role?",
-               "How is success measured in year one?"
-             ],
-             "key_selling_points": [
-               "Your 7 years of UAE FMCG experience",
-               "Track record of 120% quota attainment"
-             ]
-           }
+  Returns: { "likely_questions": [{ "q": string, "approach": string }],
+             "questions_to_ask": string[], "key_selling_points": string[] }
+  Display: Expandable question list with approach hints, then the two other lists.
 
 POST /api/premium/company-info
-  Returns: {
-             "company": "Established Search",
-             "website": "https://...",
-             "linkedin": "https://linkedin.com/company/...",
-             "note": "Mid-size executive search firm specialising in GCC FMCG placements."
-           }
+  Returns: { "company": string, "website": string|null, "linkedin": string|null,
+             "overview": string|null, "uae_presence": string|null,
+             "culture_notes": string|null, "interview_style": string|null,
+             "live_search_used": bool }
+  Display: Company card with links + AI overview sections.
+
+POST /api/job-summary         (NEW)
+  Body:    { "user_id": string, "job_id": string }
+  Returns: { "bullets": [string, string, string] }
+  Display: 3 bullet points at the top of the job card (expand/collapse).
+
+POST /api/skills-gap          (NEW)
+  Body:    { "user_id": string }
+  Returns: { "critical_gaps": string[], "nice_to_have": string[],
+             "quick_wins": string[], "estimated_impact": string }
+  Display: Dedicated "Skills Gap" card in Settings or Dashboard header.
 
 ── SYSTEM ───────────────────────────────────────────────────────────────────────
 
-GET /health
-  Returns: { "status": "ok", "ts": "2026-06-12T..." }
-
-GET /api/analytics
-  Returns: {
-             "users": 24,
-             "jobs_in_pool": 1840,
-             "matches_60plus": 312,
-             "titles": 67,
-             "applied_total": 48,
-             "skipped_total": 203
-           }
+GET /health            → { "status": "ok", "ts": string }
+GET /api/analytics     → { "users": n, "jobs_in_pool": n, "matches_60plus": n,
+                           "titles": n, "applied_total": n, "skipped_total": n }
 
 ────────────────────────────────────────────────────────────────────────────────
-PART 3 — FEATURES TO BUILD ON THE MATCHES PAGE
+PART 3 — DASHBOARD: MATCHES PAGE
 ────────────────────────────────────────────────────────────────────────────────
 
-All sorting and filtering is CLIENT-SIDE on the matches array already returned
-by /api/refresh-matches. Do NOT make new API calls for these — all fields are
-already in the response.
+── A. SEARCH BAR + FILTER/SORT ICONS ────────────────────────────────────────────
 
-── A. STATS BAR ────────────────────────────────────────────────────────────────
+Layout: [🔍 Search bar          ] [⊞ Filters] [↕ Sort]
 
-Show a horizontal stats bar above the job cards (compute from the matches array):
+The two icons on the right open PANELS:
 
-  • Total matches          → matches.length
-  • Highest score          → Math.max(...matches.map(m => m.score)) + "%"
-  • New since yesterday    → matches.filter(m => {
-                               const d = new Date(m.posted_at);
-                               const yday = new Date(Date.now() - 86400000);
-                               return d > yday;
-                             }).length
-  • Applied               → fetch separately: count of user_job_matches where
-                             user_id = userId AND status = "applied"
-                             (or track locally after each /api/job-status call)
+FILTER PANEL (left slide-in, like Noon.com):
+  Opens from left with smooth transition. Dark overlay behind. X to close.
+  Show active filter count badge on the Filters button.
 
-── B. SORT BAR ─────────────────────────────────────────────────────────────────
+  Panel sections (each collapsible):
+  ┌─────────────────────────────────┐
+  │ FILTERS                      ✕ │
+  ├─────────────────────────────────┤
+  │ ▾ Score Range                   │
+  │   ● All   ○ 60–74%              │
+  │   ○ 75–89%  ○ 90%+              │
+  ├─────────────────────────────────┤
+  │ ▾ Date Posted                   │
+  │   ● Any   ○ Last 7 days         │
+  │   ○ Last 14 days                │
+  ├─────────────────────────────────┤
+  │ ▾ Remote                        │
+  │   □ Onsite  □ Hybrid  □ Remote  │
+  ├─────────────────────────────────┤
+  │ ▾ Seniority                     │
+  │   □ Entry  □ Mid                │
+  │   □ Senior  □ Director          │
+  ├─────────────────────────────────┤
+  │ ▾ Visa Sponsorship              │
+  │   □ Likely only                 │
+  ├─────────────────────────────────┤
+  │ ▾ Platform                      │
+  │   □ LinkedIn  □ Indeed          │
+  │   □ Bayt  □ Naukrigulf          │
+  │   □ GulfTalent                  │
+  ├─────────────────────────────────┤
+  │ ▾ Industry                      │
+  │   (Show only industries present │
+  │    in current match list)       │
+  ├─────────────────────────────────┤
+  │ [Apply Filters]  [Clear All]    │
+  └─────────────────────────────────┘
 
-Dropdown or segmented control above the list. Options:
+SORT PANEL (small dropdown near button):
+  ● Best Match (score desc)  — default
+  ○ Newest First (posted_at desc)
+  ○ Highest Quality (quality_score desc)
+  ○ Salary High-Low (salary_max_aed or salary desc)
 
-  • Best Match (default) — sort by score DESC
-  • Newest First         — sort by posted_at DESC
-  • Highest Quality      — sort by quality_score DESC
-  • Salary (highest)     — sort by salary DESC
-                           Jobs with null/empty salary go to the bottom.
-                           Text sort is fine — treat "AED 20,000" as-is.
+All filtering and sorting is CLIENT-SIDE on the cached matches array.
+No new API call needed — all data is already in the response.
 
-── C. FILTER PANEL ─────────────────────────────────────────────────────────────
+── B. STATS BAR ─────────────────────────────────────────────────────────────────
 
-Collapsible sidebar or slide-in drawer. Show a filter icon button with a badge
-showing the number of active filters. Add a "Clear all" link when any filter
-is active. All filters are combinable (AND logic).
+4 stat chips above the job list (compute from matches array):
 
-Filter options:
+  📊 {matches.length} Matches
+  ⭐ Best: {max score}%
+  🆕 {jobs posted in last 7 days} Fresh
+  ✅ {applied count from board} Applied
 
-  BY STATUS (radio)
-    All | New | Applied | Skipped
-    Filter on:  match.status
+── C. PENDING TITLES BANNER ────────────────────────────────────────────────────
 
-  BY SCORE RANGE (radio or slider)
-    All | 60–74% | 75–89% | 90%+
-    Filter on:  match.score
+When pending_titles is non-empty, show below the stats bar:
+  "🔍 Finding jobs for: [Sales Director], [Regional Manager]… [spinner]"
+Auto-poll /api/refresh-matches every 20 seconds while pending_titles is non-empty.
 
-  BY INDUSTRY (multi-select checkboxes)
-    Show only industries present in current matches (dynamic list).
-    Filter on:  match.industry
+── D. JOB CARD DESIGN ──────────────────────────────────────────────────────────
 
-  BY SENIORITY (multi-select chips)
-    Entry | Mid | Senior | Director
-    Filter on:  match.seniority
-    Note:       null seniority = treat as "Mid" for display purposes
+Each card:
 
-  BY REMOTE (multi-select chips)
-    Onsite | Hybrid | Remote
-    Filter on:  match.remote_status
+  ┌────────────────────────────────────────────────┐
+  │ Area Sales Manager - GCC           [  90%  ]  │
+  │ Established Search · UAE · Indeed              │
+  │ 3 days ago · AED 18k–25k                      │
+  │ ─────────────────────────────────────────────  │
+  │ 🤖 "8yr GCC sales matches regional mgmt req;   │
+  │    FMCG dist. background aligns with role"     │
+  │                                                │
+  │ [Senior] [Onsite] [Visa Likely]               │
+  │                                                │
+  │ [▶ Job Intelligence ✨ PREMIUM]               │
+  │                                                │
+  │ [↗ View & Apply]  [✓ Applied]  [✗ Skip]      │
+  └────────────────────────────────────────────────┘
 
-  VISA SPONSORSHIP (toggle)
-    "Visa likely only"
-    Filter on:  match.visa_likelihood === "high"
+Score badge colour:
+  90–100: green #16a34a
+  75–89:  blue  #2563eb
+  60–74:  amber #d97706
 
-  BY PLATFORM (multi-select chips)
-    LinkedIn | Indeed | Bayt | Naukrigulf | GulfTalent | Other
-    Filter on:  match.platform (case-insensitive contains)
+match_reason: show in muted italic below meta line. Use left border matching
+score colour. Hide entirely if null/empty (no placeholder dash).
 
-  DATE POSTED (radio)
-    Any date | Last 7 days | Last 14 days
-    Filter on:  match.posted_at
+Tags (chips): show remote_status (if not onsite/unknown), visa_likelihood=high
+as "Visa Likely", seniority. Don't show null tags.
 
-── D. SEARCH BAR ───────────────────────────────────────────────────────────────
+── E. JOB INTELLIGENCE ACCORDION ────────────────────────────────────────────────
 
-Simple text input. Instant client-side filter across:
-  • match.title
-  • match.company
-  Case-insensitive, partial match is fine.
-  Combine with all other active filters.
+On first expand, fire ALL 5 premium calls in parallel:
+  Promise.all([ats-score, salary, red-flags, interview-prep, company-info])
+Cache results in memory by job_id. Re-opening accordion shows cached data instantly.
 
-── E. PENDING TITLES BANNER ────────────────────────────────────────────────────
+Also add a "📋 Job Summary" line (3 bullets from /api/job-summary) at the top of
+the card body (not behind premium). Show a skeleton while loading.
 
-When /api/refresh-matches returns pending_titles with items, show a subtle
-info banner below the search/filter bar:
-
-  "Finding jobs for: Sales Director, Regional Manager…  [spinner]"
-
-Auto-refresh the matches every 30 seconds while pending_titles is non-empty.
-Remove the banner once pending_titles is empty.
-
-── F. MATCH REASON ON CARDS ────────────────────────────────────────────────────
-
-Each job card has a match.match_reason string (≤200 chars AI explanation).
-Show it as a muted subtitle line below the job title/company row.
-Example: "Strong alignment with GCC territory management and FMCG distribution background."
-
-If match_reason is null or empty, hide the line entirely (don't show a dash or
-empty space).
-
-────────────────────────────────────────────────────────────────────────────────
-PART 4 — JOB INTELLIGENCE ACCORDION (PREMIUM)
-────────────────────────────────────────────────────────────────────────────────
-
-The "Job Intelligence — PREMIUM" collapsible section on each card should call
-the actual premium endpoints when expanded. Currently it seems to be static
-or showing loading state.
-
-On first expand of the accordion for a given job, call all five endpoints in
-parallel (Promise.all) and cache the results per job_id for the session:
-
-  /api/premium/ats-score     → show ATS score + missing keywords
-  /api/premium/salary        → show salary range in AED
-  /api/premium/red-flags     → show risk level badge + flags list
-  /api/premium/interview-prep → show likely questions + questions to ask
-  /api/premium/company-info  → show company website + LinkedIn + note
-
-Show a loading skeleton per section while the calls are in flight.
-Cache results so re-expanding the accordion doesn't re-fetch.
-
-Each call takes { "user_id": currentUserId, "job_id": job.id }.
+Display each section:
+  ATS SCORE: Large label ("Good"), 4 horizontal progress bars for breakdown,
+             then missing keywords as red chips, strengths as green chips,
+             improvements as numbered list.
+  SALARY:    "AED 18,000 – 25,000 / mo" + confidence badge + basis text.
+  RED FLAGS: Risk badge (green/amber/red) + bullet list of flags and positives.
+  INTERVIEW: Expandable list of 6 Q&A pairs, then "Questions to Ask" list,
+             then "Sell Yourself" list.
+  COMPANY:   Card with website/LinkedIn buttons + overview text + culture notes.
 
 ────────────────────────────────────────────────────────────────────────────────
-PART 5 — SETTINGS PAGE: TITLE MANAGEMENT
+PART 4 — APPLICATION TRACKING BOARD (KANBAN)  ← NEW FEATURE
 ────────────────────────────────────────────────────────────────────────────────
 
-The settings/profile page has a title management section. Use /api/get-titles
-(new endpoint) to show enriched title cards instead of a plain list:
+Add a second tab on the dashboard: "Track Applications"
 
-Each title card shows:
-  • keyword (e.g. "Sales Manager")
-  • job_count: "142 jobs in pool"
-  • last_scraped: "Last checked 2 hours ago" (relative time from last_scraped)
-    If last_scraped is null: "Not yet scraped"
-  • Delete button (calls /api/delete-title with user_title_id)
+Data source: POST /api/application-board  →  board.new / applied / interview / offer / rejected / skipped
 
-Adding a new title:
-  1. Call /api/can-edit-titles to check if user is under the 10-title limit
-  2. If can_add: false, show: "Title limit reached (10/10). Remove a title to add another."
-  3. On add: call /api/add-title, then call /api/get-titles to refresh the list
-  4. Show a subtle "Scraping jobs…" indicator next to the new title for 30s
+Kanban columns (left to right, scrollable on mobile):
+  Applied → Interview → Offer → Rejected
 
-────────────────────────────────────────────────────────────────────────────────
-PART 6 — SUPABASE MIGRATION (RUN IN SQL EDITOR)
-────────────────────────────────────────────────────────────────────────────────
+Each card shows: title, company, score badge, interview_date if set, notes snippet.
 
-Run this in the Supabase SQL Editor before redeploying the backend.
-It is safe to run multiple times (IF NOT EXISTS everywhere):
+User actions per card:
+  • "Set interview date" → date picker → POST /api/set-interview-date
+  • "Add note" → text field → POST /api/update-match-notes
+  • Drag card between columns → POST /api/job-status with new status
+  • "Move back to New" → sets status to "new" (returns card to matches list)
 
-  ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS quality_score int;
-  ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
-
-The `match_reason` and `status` columns were added in an earlier migration
-and already exist.
+Display interview_date as "Interview: Tue 15 Jul 2026" if set.
+Show a 🔔 reminder chip if interview_date is within 48 hours.
 
 ────────────────────────────────────────────────────────────────────────────────
-PART 7 — DATA TYPE REFERENCE
+PART 5 — SETTINGS PAGE
 ────────────────────────────────────────────────────────────────────────────────
 
-Job object fields (from /api/refresh-matches matches array):
+── TITLE MANAGEMENT ─────────────────────────────────────────────────────────────
+
+Use POST /api/get-titles for the list. Each title card shows:
+  • keyword
+  • "{n} jobs in pool" (from job_count)
+  • "Last checked {relative time}" (from last_scraped), or "Not yet checked"
+  • [Delete] button using user_title_id
+
+Add title: check /api/can-edit-titles first. Show "Limit reached (10/10)" if full.
+After adding, poll /api/get-titles every 10 seconds for 60 seconds to show
+"Scraping…" → "142 jobs found" transition.
+
+── SKILLS GAP CARD ──────────────────────────────────────────────────────────────
+
+Below title management, show a "Skills Gap Analysis" card:
+
+  [Analyse My Gaps]  → POST /api/skills-gap with { user_id }
+
+  Result display:
+  ❗ Critical Gaps: [Python] [Salesforce] [SAP]
+  💡 Nice to Have: [PowerBI] [Tableau]
+  🎯 Quick Wins:   [Google Analytics Cert] [HubSpot CRM Cert]
+  📈 "Adding Python and Salesforce would likely increase match scores by 15–20%"
+
+Cache result for 24 hours (don't re-fetch on every page visit).
+
+── CV MANAGEMENT ────────────────────────────────────────────────────────────────
+
+Show current CV status:
+  • "CV uploaded — {chars} characters" or "No CV uploaded"
+  • "When you upload a new CV, all your matches are automatically re-scored."
+  • Upload button (PDF/DOCX/TXT, max 5MB)
+  • After upload: show rescoring=true message: "Matches will be re-scored with your new CV"
+
+────────────────────────────────────────────────────────────────────────────────
+PART 6 — JOB DATA TYPES REFERENCE
+────────────────────────────────────────────────────────────────────────────────
+
+Job object (from /api/refresh-matches or /api/application-board):
 
   id              string (uuid)
   title           string
-  company         string  (may be "Unknown" for anonymous listings)
-  location        string  (usually "United Arab Emirates" or city)
-  posted_at       string  (ISO 8601, e.g. "2026-06-10T09:00:00+00:00")
-  link            string  (full URL to the original job posting)
-  platform        string  (LinkedIn | Indeed | Bayt | Naukrigulf | GulfTalent | other)
-  salary          string | null  (raw text from scraper, not normalised)
-  description     string  (truncated to 1500 chars)
-  score           number  (0–100, AI match score; only 60+ in this response)
-  quality_score   number  (0–100, listing quality heuristic)
-  match_reason    string | null  (AI explanation ≤200 chars)
-  status          "new" | "skipped" | "applied"
-  industry        string | null  (Healthcare & Pharmacy | Retail | FMCG | Technology |
-                                   Banking & Finance | Real Estate | Hospitality | etc.)
-  seniority       "entry" | "mid" | "senior" | "director" | null
-  remote_status   "onsite" | "hybrid" | "remote" | "unknown" | null
-  visa_likelihood "high" | "medium" | "low" | null
-  last_scraped    string  (ISO 8601 timestamp)
-  fingerprint     string  (internal dedup hash, not needed by frontend)
-  search_keyword  string  (normalised title used for scraping)
+  company         string          may be "Unknown" for anonymous listings
+  location        string          usually "United Arab Emirates" or city
+  posted_at       string          ISO 8601 timestamp
+  link            string          full URL to original job posting
+  platform        string          LinkedIn | Indeed | Bayt | Naukrigulf | GulfTalent | other
+  salary          string|null     raw text from scraper (may be null)
+  salary_min_aed  number|null     parsed min from premium/salary call
+  salary_max_aed  number|null     parsed max from premium/salary call
+  description     string          truncated to 1500 chars
+  score           number          0–100 AI match score (60+ only returned)
+  quality_score   number          0–100 listing quality (salary + desc + recency + platform)
+  match_reason    string|null     AI explanation ≤220 chars — always specific to job+CV
+  status          "new" | "skipped" | "applied" | "interview" | "offer" | "rejected"
+  notes           string|null     user free-text notes
+  interview_date  string|null     ISO timestamp set by user
+  industry        string|null     Healthcare & Pharmacy | Retail | FMCG | Technology | etc.
+  seniority       "entry"|"mid"|"senior"|"director"|null
+  remote_status   "onsite"|"hybrid"|"remote"|"unknown"|null
+  visa_likelihood "high"|"medium"|"low"|null
+  summary_bullets string|null     JSON array cached from /api/job-summary
+  link_active     bool            false if link was detected as dead
+
+Score display colours:
+  90–100 → #16a34a (green)
+  75–89  → #2563eb (blue)
+  60–74  → #d97706 (amber)
 
 ================================================================================
 END OF PROMPT

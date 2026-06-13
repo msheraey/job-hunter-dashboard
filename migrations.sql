@@ -34,5 +34,15 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active timestamptz;
 -- quality_score on matches (mirrors job_pool.quality_score; lets frontend query it directly)
 ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS quality_score int;
 
--- created_at timestamp for analytics (new-today counts, etc.)
+-- created_at timestamp for analytics
 ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
+
+-- Application tracking: extended statuses + free-text notes per match
+ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS interview_date timestamptz;
+ALTER TABLE user_job_matches ADD COLUMN IF NOT EXISTS notes text;
+
+-- Job pool enrichments from premium features
+ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS salary_min_aed int;
+ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS salary_max_aed int;
+ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS summary_bullets text;  -- JSON array cached here
+ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS link_active boolean DEFAULT true;

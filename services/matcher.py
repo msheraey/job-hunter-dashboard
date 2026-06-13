@@ -153,9 +153,16 @@ def refresh_matches_for_user(user, logger=None):
     return {"matches": jobs, "pending_titles": pending}
 
 def set_job_status(user_id, job_id, status):
-    """Skip/Applied buttons. status: new | skipped | applied."""
-    if status not in ("new", "skipped", "applied"):
+    """Update job status. Accepted: new | skipped | applied | interview | offer | rejected."""
+    if status not in ("new", "skipped", "applied", "interview", "offer", "rejected"):
         return False
     return safe_upsert("user_job_matches",
                        {"user_id": user_id, "job_id": job_id, "status": status},
                        on_conflict="user_id,job_id", label="status")
+
+
+def update_match_notes(user_id, job_id, notes):
+    """Store free-text notes against a match (recruiter name, follow-up date, etc.)."""
+    return safe_upsert("user_job_matches",
+                       {"user_id": user_id, "job_id": job_id, "notes": notes},
+                       on_conflict="user_id,job_id", label="notes")
