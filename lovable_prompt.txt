@@ -56,9 +56,11 @@ BASE URL: https://[your-backend]/
 
 POST /api/refresh-matches
   Body:    { "user_id": string }
-  Returns: { "matches": Job[], "pending_titles": string[] }
+  Returns: { "matches": Job[], "pending_titles": string[], "user_industry": string|null }
   Notes:   - pending_titles = titles still being scraped (show loading banner)
            - Only returns status="new" jobs (60%+ score)
+           - user_industry = the user's detected primary industry (e.g. "Finance & Banking")
+           - Each job has industry_match: bool — true if job.industry === user_industry
            - Call on dashboard mount; cache result
 
 POST /api/job-status
@@ -260,22 +262,38 @@ SORT PANEL (small dropdown near button):
 All filtering and sorting is CLIENT-SIDE on the cached matches array.
 No new API call needed — all data is already in the response.
 
-── B. STATS BAR ─────────────────────────────────────────────────────────────────
+── B. INDUSTRY SPLIT TABS ───────────────────────────────────────────────────────
 
-4 stat chips above the job list (compute from matches array):
+Below the search bar, show two tabs that split the matches list:
+
+  [ Your Industry ({n}) ]  [ Other Industries ({n}) ]
+
+- "Your Industry" tab: jobs where industry_match === true
+  - Header: "Matches in {user_industry}" (from user_industry field in API response)
+  - If user_industry is null or no industry matches exist, hide this tab and show all jobs in one list
+- "Other Industries" tab: jobs where industry_match === false or industry is null
+  - Header: "Cross-Industry Matches"
+  - Sub-label: "Roles where your skills transfer"
+- Default: "Your Industry" tab active (if it has results), else "Other Industries"
+- Tab counts update when filters are applied
+- Both tabs share the same filter/sort state
+
+── C. STATS BAR ─────────────────────────────────────────────────────────────────
+
+4 stat chips above the tabs (compute from full matches array, not filtered):
 
   📊 {matches.length} Matches
   ⭐ Best: {max score}%
   🆕 {jobs posted in last 7 days} Fresh
   ✅ {applied count from board} Applied
 
-── C. PENDING TITLES BANNER ────────────────────────────────────────────────────
+── D. PENDING TITLES BANNER ────────────────────────────────────────────────────
 
 When pending_titles is non-empty, show below the stats bar:
   "🔍 Finding jobs for: [Sales Director], [Regional Manager]… [spinner]"
 Auto-poll /api/refresh-matches every 20 seconds while pending_titles is non-empty.
 
-── D. JOB CARD DESIGN ──────────────────────────────────────────────────────────
+── E. JOB CARD DESIGN ──────────────────────────────────────────────────────────
 
 Each card:
 
@@ -309,7 +327,7 @@ Hide the section entirely if match_reason is null/empty.
 
 Tags (chips): show remote_status (if not onsite/unknown), seniority. Don't show null tags.
 
-── E. JOB INTELLIGENCE ACCORDION ────────────────────────────────────────────────
+── F. JOB INTELLIGENCE ACCORDION ────────────────────────────────────────────────
 
 On first expand, fire ALL 5 premium calls in parallel:
   Promise.all([ats-score, salary, red-flags, interview-prep, company-info])
@@ -417,6 +435,7 @@ Job object (from /api/refresh-matches or /api/application-board):
   visa_likelihood "high"|"medium"|"low"|null
   summary_bullets string|null     JSON array cached from /api/job-summary
   link_active     bool            false if link was detected as dead
+  industry_match  bool            true if job.industry matches the user's primary industry
 
 Score display colours:
   90–100 → #16a34a (green)

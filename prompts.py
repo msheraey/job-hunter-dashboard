@@ -9,10 +9,10 @@ def scoring_prompt(job_title, company, description, user_profile, industries):
 JOB:
 Title: {job_title}
 Company: {company}
-Description: {(description or 'Not provided')[:700]}
+Description: {(description or 'Not provided')[:1200]}
 
 CANDIDATE:
-{user_profile[:1000]}
+{user_profile[:1500]}
 
 Scoring guide:
 90-100: Candidate meets ALL core requirements with direct experience
