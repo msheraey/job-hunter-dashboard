@@ -179,18 +179,26 @@ POST /api/skills-gap          (NEW)
 
 POST /api/account-links
   Body:    { "user_id": string }
-  Returns: { "links": [{ "site": "linkedin|indeed|bayt|naukrigulf|gulftalent",
-                          "status": "linked|unlinked|expired",
-                          "linked_at": string|null }] }
-  Display: 5 platform cards in profile/settings. Green check = linked, grey = unlinked.
+  Returns: { "links": [
+               { "site": string, "label": string, "url": string,
+                 "status": "linked|unlinked|expired", "linked_at": string|null }
+             ] }
+  Platforms returned (12 total):
+    linkedin, indeed, bayt, naukrigulf, gulftalent,
+    dubizzle, laimoon, drjobs, glassdoor, monster, xpatjobs, ziprecruiter
 
 POST /api/set-account-link
   Body:    { "user_id": string, "site": string, "status": "linked|unlinked" }
   Returns: { "ok": true }
-  Use:     Toggle button on each platform card to mark as linked/unlinked.
-  Note:    This records the user's self-reported account status only. Auto-apply
-           via API is not available on UAE job boards. Users apply manually through
-           the linked platform using their stored credentials.
+
+DISPLAY — Profile / Settings page, "Job Boards" section:
+  • Show all 12 platforms in a 2-column grid of cards.
+  • Each card: platform logo/icon (use favicon or letter avatar), label from API,
+    "Linked ✓" green badge or "Not linked" grey badge.
+  • Toggle button: "Mark as Linked" / "Unlink".
+  • "Open" icon-button → opens link.url in a new tab so user can go create/access account.
+  • On toggle: call /api/set-account-link then refresh /api/account-links.
+  Note: This records self-reported status only. Users apply manually via the platform.
 
 ── SYSTEM ───────────────────────────────────────────────────────────────────────
 
