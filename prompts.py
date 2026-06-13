@@ -103,14 +103,23 @@ CANDIDATE'S COMPLETE WORK HISTORY (ALL {exp_count} ROLES — you MUST include ev
 ADDITIONAL CV DATA:
 {(cv_text or '')[:3000]}
 
+STEP 1 — KEYWORD EXTRACTION (do this mentally before writing):
+Identify the 10-15 most important keywords from the job description: required skills, tools,
+methodologies, certifications, and domain terms (e.g. "CRM", "P&L management", "B2B sales",
+"SAP", "agile", "KPI tracking"). For each keyword, decide if the candidate's actual experience
+covers it. If yes, it MUST appear naturally in their bullets or skills section.
+
 ABSOLUTE RULES — these are non-negotiable:
 1. INCLUDE EVERY ROLE listed above — you must output exactly {exp_count} experience items. Removing any role is forbidden.
 2. INCLUDE all education, certifications, and qualifications exactly as provided — do not drop any.
-3. You may REORDER bullets within a role to put the most job-relevant achievements first.
-4. You may REWRITE bullet text to be stronger and more relevant — but preserve all real facts, numbers, and dates.
-5. Write a tailored Professional Summary (2-3 sentences) highlighting what makes this candidate right for THIS role specifically.
-6. Skills section: include keywords from the job description that the candidate genuinely has.
-7. Do NOT invent experience, companies, dates, or qualifications.
+3. REORDER bullets within each role so the most job-relevant achievements come first.
+4. REWRITE bullet text to be stronger and ATS-optimised — use exact keywords from the job
+   description wherever the candidate genuinely has that experience. Keep all real facts, numbers, dates.
+5. Professional Summary (2-3 sentences): name-drop the job title, highlight the candidate's
+   most relevant experience, and include 2-3 keywords from the job description.
+6. Skills section: list every keyword from the job description that the candidate genuinely has.
+   Group as core skills, tools/software, and languages. Do not invent skills.
+7. Do NOT invent experience, companies, dates, qualifications, or skills.
 8. UAE-standard format: no photo reference, no nationality, no date of birth.
 
 Return ONLY valid JSON — no markdown, no preamble, no explanation:

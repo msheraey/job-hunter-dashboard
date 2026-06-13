@@ -35,9 +35,23 @@ NOTIFY_INSTANT  = os.environ.get("NOTIFY_INSTANT", "false").lower() == "true"  #
 SEMANTIC_EXPAND = os.environ.get("SEMANTIC_EXPAND", "true").lower() == "true"
 
 # ── Trusted job platforms ────────────────────────────────────
+# Allowlist of known legitimate job boards and ATS platforms with UAE presence.
+# Only links whose domain contains one of these strings are saved.
 TRUSTED_DOMAINS = [
-    "linkedin.com", "indeed.com", "bayt.com",
-    "naukrigulf.com", "gulftalent.com", "gofindit.com",
+    # UAE & Gulf-specific boards
+    "bayt.com", "naukrigulf.com", "gulftalent.com", "dubizzle.com",
+    "laimoon.com", "drjobs.ae", "careers.ae", "gulfworkforce.com",
+    "xpatjobs.com", "gofindit.com", "tiptopjob.com",
+    # Global boards with strong UAE volume
+    "linkedin.com", "indeed.com", "glassdoor.com", "monster.com",
+    "ziprecruiter.com", "careerjet.com", "simplyhired.com", "jora.com",
+    "totaljobs.com", "reed.co.uk", "cv-library.co.uk",
+    # Major ATS platforms used by UAE corporates (DEWA, Emirates, Etihad, ADNOC, banks, etc.)
+    "workday.com", "myworkdayjobs.com", "taleo.net", "successfactors.com",
+    "greenhouse.io", "lever.co", "smartrecruiters.com", "icims.com",
+    "jobvite.com", "bamboohr.com", "breezyhr.com", "recruitee.com",
+    # Industry-specific with UAE listings
+    "hozpitality.com", "hospitalityonline.com", "healthcaresource.com",
 ]
 
 INDUSTRY_LIST = [
