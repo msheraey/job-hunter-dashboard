@@ -10,21 +10,24 @@ from core.db import safe_select
 
 
 def _load_top_unactioned(user_id, limit=10):
-    """Return top unactioned 60%+ matches with full job data."""
+    """Return top unactioned 60%+ matches posted within the last 20 days, deduped by link."""
     from config import get_supabase
+    from datetime import datetime, timezone, timedelta
     try:
         rows = get_supabase().table("user_job_matches").select(
             "job_id,score,match_reason").eq("user_id", user_id).eq(
             "status", "new").gte("score", config.MATCH_THRESHOLD).order(
-            "score", desc=True).limit(limit).execute().data or []
+            "score", desc=True).limit(limit * 3).execute().data or []
     except Exception:
         return []
     if not rows:
         return []
     ids = [r["job_id"] for r in rows]
     smap = {r["job_id"]: r for r in rows}
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat()
     try:
-        jobs = get_supabase().table("job_pool").select("*").in_("id", ids).execute().data or []
+        jobs = get_supabase().table("job_pool").select("*").in_(
+            "id", ids).gte("posted_at", cutoff).execute().data or []
     except Exception:
         return []
     for j in jobs:
@@ -32,7 +35,17 @@ def _load_top_unactioned(user_id, limit=10):
         j["score"] = r.get("score", 0)
         j["match_reason"] = r.get("match_reason")
     jobs.sort(key=lambda x: x.get("score", 0), reverse=True)
-    return jobs
+    seen_links, deduped = set(), []
+    for j in jobs:
+        link = (j.get("link") or "").strip()
+        if link and link in seen_links:
+            continue
+        if link:
+            seen_links.add(link)
+        deduped.append(j)
+        if len(deduped) >= limit:
+            break
+    return deduped
 
 
 def _send_email(user_email, user_name, jobs, is_catchup=False):

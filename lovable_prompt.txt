@@ -213,9 +213,6 @@ FILTER PANEL (left slide-in, like Noon.com):
   │   □ Entry  □ Mid                │
   │   □ Senior  □ Director          │
   ├─────────────────────────────────┤
-  │ ▾ Visa Sponsorship              │
-  │   □ Likely only                 │
-  ├─────────────────────────────────┤
   │ ▾ Platform                      │
   │   □ LinkedIn  □ Indeed          │
   │   □ Bayt  □ Naukrigulf          │
@@ -276,11 +273,15 @@ Score badge colour:
   75–89:  blue  #2563eb
   60–74:  amber #d97706
 
-match_reason: show in muted italic below meta line. Use left border matching
-score colour. Hide entirely if null/empty (no placeholder dash).
+match_reason: The backend stores this as JSON string {"m": [...], "g": [...]}.
+Parse it with JSON.parse(). "m" = match bullets (what the candidate has), "g" = gap
+bullets (what is missing). Display as two bulleted lists below the meta line:
+  ✓ match bullets in the score colour (green/blue/amber)
+  △ gap bullets in red (#ef4444), max 2 gaps shown
+If JSON.parse fails or field is null, show the raw string as a single bullet.
+Hide the section entirely if match_reason is null/empty.
 
-Tags (chips): show remote_status (if not onsite/unknown), visa_likelihood=high
-as "Visa Likely", seniority. Don't show null tags.
+Tags (chips): show remote_status (if not onsite/unknown), seniority. Don't show null tags.
 
 ── E. JOB INTELLIGENCE ACCORDION ────────────────────────────────────────────────
 
@@ -380,7 +381,7 @@ Job object (from /api/refresh-matches or /api/application-board):
   description     string          truncated to 1500 chars
   score           number          0–100 AI match score (60+ only returned)
   quality_score   number          0–100 listing quality (salary + desc + recency + platform)
-  match_reason    string|null     AI explanation ≤220 chars — always specific to job+CV
+  match_reason    string|null     JSON string {"m": string[], "g": string[]} — match and gap bullets
   status          "new" | "skipped" | "applied" | "interview" | "offer" | "rejected"
   notes           string|null     user free-text notes
   interview_date  string|null     ISO timestamp set by user

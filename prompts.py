@@ -22,9 +22,9 @@ Scoring guide:
 0-29: Poor fit
 
 Return ONLY valid JSON (no markdown):
-{{"score": 0-100, "industry": "one of: {industries}", "reason": "2-3 specific match/gap points referencing both the job requirement AND the candidate evidence, e.g. '8yr GCC sales matches regional mgmt req; FMCG dist. exp aligns with role; missing CRM tool mention'", "seniority": "entry/mid/senior/director", "remote": "onsite/hybrid/remote/unknown", "visa_likelihood": "high/medium/low"}}
+{{"score": 0-100, "industry": "one of: {industries}", "match_bullets": ["job requires X → candidate has Y (cite actual evidence)", "...up to 5 items"], "gap_bullets": ["job requires X → candidate lacks it", "...up to 4 items, empty array if no gaps"], "seniority": "entry/mid/senior/director", "remote": "onsite/hybrid/remote/unknown", "visa_likelihood": "high/medium/low"}}
 
-The reason field MUST reference specific skills/experience from the job description matched against the candidate's actual background. Never write generic phrases."""
+Rules: Each bullet must name the specific requirement from the job AND the matching (or missing) evidence from the candidate. No generic phrases. gap_bullets = [] if no significant gaps."""
 
 
 def synonym_prompt(title):
