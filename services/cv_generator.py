@@ -18,7 +18,7 @@ from services.scorer import ai_complete
 from services.docx_builder import build_cv, build_cover_letter
 from services.cv_parser_structured import extract_structure
 
-CV_MAX_TOKENS = 2800
+CV_MAX_TOKENS = 3200
 CL_MAX_TOKENS = 900
 
 

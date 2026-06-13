@@ -144,7 +144,6 @@ def save_jobs(keyword, items, log=print):
         link = item.get("source_url") or ""
         if (is_junk(title) or is_nationality_restricted(title) or len(title) < 5
                 or not link.startswith("http")
-                or not any(d in link for d in config.TRUSTED_DOMAINS)
                 or link in existing):
             continue
         posted_at = None

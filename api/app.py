@@ -193,6 +193,9 @@ def api_add_title():
             user = _user(user_id) or {}
             search_jobs(keyword, user_gender=user.get("gender"))
             for syn in expand_title(keyword):
+                # Enforce 10-title limit — synonyms must not push user over cap
+                if len(safe_select("user_titles", user_id=user_id)) >= 10:
+                    break
                 syn_row, _ = get_or_create_title(syn)
                 if syn_row:
                     link_user_title(user_id, syn_row)
@@ -244,7 +247,13 @@ def api_can_edit_titles():
 @app.route("/api/delete-title", methods=["POST"])
 def api_delete_title():
     body = request.get_json(silent=True) or {}
-    ok = safe_delete("user_titles", user_id=body.get("user_id"), title_id=body.get("title_id"))
+    user_id = body.get("user_id")
+    # Accept user_title_id (PK of user_titles row) or legacy title_id field
+    user_title_id = body.get("user_title_id") or body.get("title_id")
+    if not user_id or not user_title_id:
+        return jsonify({"error": "user_id and title_id required"}), 400
+    # Delete by primary key of user_titles, scoped to user for safety
+    ok = safe_delete("user_titles", id=user_title_id, user_id=user_id)
     return jsonify({"ok": ok})
 
 @app.route("/api/delete-user", methods=["POST"])
@@ -257,6 +266,34 @@ def api_delete_user():
     safe_delete("user_titles", user_id=uid)
     ok = safe_delete("users", id=uid)
     return jsonify({"ok": ok})
+
+# ── Account links ────────────────────────────────────────────
+@app.route("/api/account-links", methods=["POST"])
+def api_get_account_links():
+    """Return linked-platform status for the user's profile page."""
+    body = request.get_json(silent=True) or {}
+    user_id = body.get("user_id")
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+    from services.account_links import get_links
+    return jsonify({"links": get_links(user_id)})
+
+@app.route("/api/set-account-link", methods=["POST"])
+def api_set_account_link():
+    """Set or clear a platform link (linked / unlinked / expired)."""
+    body = request.get_json(silent=True) or {}
+    user_id = body.get("user_id")
+    site = body.get("site")
+    status = body.get("status", "linked")
+    if not user_id or not site:
+        return jsonify({"error": "user_id and site required"}), 400
+    from services.account_links import set_link, SITES, VALID_STATUSES
+    if site not in SITES:
+        return jsonify({"error": f"site must be one of: {', '.join(SITES)}"}), 400
+    if status not in VALID_STATUSES:
+        return jsonify({"error": "status must be linked, unlinked, or expired"}), 400
+    ok = set_link(user_id, site, status, body.get("meta"))
+    return jsonify({"ok": ok}), (200 if ok else 400)
 
 # ── CV: generate + upload ────────────────────────────────────
 @app.route("/api/generate-cv", methods=["POST"])

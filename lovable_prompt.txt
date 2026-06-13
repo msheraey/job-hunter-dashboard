@@ -99,8 +99,9 @@ POST /api/can-edit-titles
   Returns: { "can_add": bool, "count": number, "max": 10 }
 
 POST /api/delete-title
-  Body:    { "user_id": string, "title_id": string }  ← use user_title_id here
+  Body:    { "user_id": string, "user_title_id": string }
   Returns: { "ok": true }
+  Note:    Pass the user_title_id field from /api/get-titles response (NOT title_id)
 
 ── CV & DOCUMENTS ───────────────────────────────────────────────────────────────
 
@@ -173,6 +174,23 @@ POST /api/skills-gap          (NEW)
   Returns: { "critical_gaps": string[], "nice_to_have": string[],
              "quick_wins": string[], "estimated_impact": string }
   Display: Dedicated "Skills Gap" card in Settings or Dashboard header.
+
+── ACCOUNT LINKS (profile page) ─────────────────────────────────────────────
+
+POST /api/account-links
+  Body:    { "user_id": string }
+  Returns: { "links": [{ "site": "linkedin|indeed|bayt|naukrigulf|gulftalent",
+                          "status": "linked|unlinked|expired",
+                          "linked_at": string|null }] }
+  Display: 5 platform cards in profile/settings. Green check = linked, grey = unlinked.
+
+POST /api/set-account-link
+  Body:    { "user_id": string, "site": string, "status": "linked|unlinked" }
+  Returns: { "ok": true }
+  Use:     Toggle button on each platform card to mark as linked/unlinked.
+  Note:    This records the user's self-reported account status only. Auto-apply
+           via API is not available on UAE job boards. Users apply manually through
+           the linked platform using their stored credentials.
 
 ── SYSTEM ───────────────────────────────────────────────────────────────────────
 
