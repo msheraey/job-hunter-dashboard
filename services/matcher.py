@@ -37,7 +37,8 @@ def _user_titles(user_id):
         return []
     ids = [l["title_id"] for l in links]
     try:
-        return get_supabase().table("title_pool").select("keyword,normalized").in_("id", ids).execute().data or []
+        return get_supabase().table("title_pool").select(
+            "keyword,normalized,last_scraped").in_("id", ids).execute().data or []
     except Exception as e:
         print(f"  ⚠️ titles fetch: {e}")
         return []
@@ -121,7 +122,11 @@ def refresh_matches_for_user(user, logger=None):
     for t in titles:
         all_pooled = safe_select("job_pool", search_keyword=t["normalized"])
         if not all_pooled:
-            pending.append(t["keyword"])
+            # Only mark pending if not already scraped recently — a fresh scrape
+            # with 0 results means the title is too niche; don't retry endlessly
+            from services.scraper import is_fresh
+            if not is_fresh(t.get("last_scraped")):
+                pending.append(t["keyword"])
             continue
         # Enforce same date cutoff as search_jobs() — exclude stale but keep undated
         pooled = []
