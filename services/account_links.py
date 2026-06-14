@@ -7,6 +7,7 @@ account on that platform. Status is stored in user_linked_accounts and shown
 in the profile page so users can track which boards to apply through manually.
 """
 from datetime import datetime, timezone
+from typing import Optional
 from core.db import safe_select, safe_upsert
 
 # Ordered by relevance for UAE job seekers.
@@ -52,7 +53,7 @@ def get_links(user_id: str):
     ]
 
 
-def set_link(user_id: str, site: str, status: str, meta: dict | None = None):
+def set_link(user_id: str, site: str, status: str, meta: Optional[dict] = None):
     """Upsert link status for one platform. Returns True on success."""
     if site not in SITES:
         return False
