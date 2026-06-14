@@ -28,7 +28,16 @@ Rules: Each bullet must name the specific requirement from the job AND the match
 
 
 def synonym_prompt(title):
-    return f"""Generate 3 alternative job titles a UAE job seeker searching "{title}" should also search. Same role, different naming. Return ONLY a JSON array of strings, no markdown. Example: ["title1","title2","title3"]"""
+    return f"""Generate 3 alternative job titles a UAE job seeker searching "{title}" should also search.
+
+Rules:
+- Same role, different naming convention only
+- 2-4 words maximum per title — short titles only
+- Must be titles actually posted on LinkedIn, Indeed, Bayt, or Naukrigulf
+- No invented compound phrases, no descriptions, no industry qualifiers
+- If the original is already short/common, return closely related standard variants only
+
+Return ONLY a JSON array of 3 strings, no markdown: ["title1","title2","title3"]"""
 
 
 def cover_letter_prompt(user_profile, cv_text, job):
