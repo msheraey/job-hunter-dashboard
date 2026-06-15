@@ -87,12 +87,6 @@ def salary_estimate(job):
                                    label="salary", max_tokens=SALARY_TOKENS))
     if not data:
         return {"error": "AI unavailable — try again shortly"}
-    # Persist salary range to job_pool for future display
-    if job.get("id") and data.get("min_aed") and not job.get("salary_min_aed"):
-        safe_update("job_pool", {
-            "salary_min_aed": data["min_aed"],
-            "salary_max_aed": data.get("max_aed"),
-        }, label="salary_persist", id=job["id"])
     return data
 
 
