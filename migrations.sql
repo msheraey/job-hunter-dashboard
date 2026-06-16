@@ -53,3 +53,10 @@ CREATE INDEX IF NOT EXISTS idx_job_pool_posted_at ON job_pool (posted_at);
 CREATE INDEX IF NOT EXISTS idx_ujm_user_status_score ON user_job_matches (user_id, status, score DESC);
 CREATE INDEX IF NOT EXISTS idx_ujm_job_id ON user_job_matches (job_id);
 CREATE INDEX IF NOT EXISTS idx_old_jobs_moved_at ON old_jobs (moved_at DESC);
+
+-- SerpApi monthly quota tracking (free plan: 250 searches/month)
+CREATE TABLE IF NOT EXISTS serpapi_usage (
+  month text PRIMARY KEY,        -- 'YYYY-MM'
+  call_count int NOT NULL DEFAULT 0,
+  updated_at timestamptz DEFAULT now()
+);

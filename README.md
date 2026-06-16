@@ -86,8 +86,8 @@ jobhunter/
 │   └── selftest.py          Startup health checks — tests every API before running
 │
 ├── services/                Business logic — one responsibility per file
-│   ├── scraper.py           DataForSEO Live (primary) + Async (fallback), TTL cache
-│   ├── scorer.py            AI scoring: Groq → Gemini → Haiku chain
+│   ├── scraper.py           SerpApi (primary) + DataForSEO Live/Async (fallback), TTL cache
+│   ├── scorer.py            AI provider chain, isolated scoring/interactive lanes
 │   ├── matcher.py           Per-user match orchestration (search + score + save)
 │   ├── classifier.py        Job quality score — heuristic, zero AI cost
 │   ├── synonyms.py          Semantic title expansion (AI-generated synonyms per title)
@@ -139,7 +139,11 @@ If any core dependency (Supabase, DataForSEO) fails the self-test, the run abort
 
 ### Scoring Chain
 
-Each job goes through the following chain until a score is returned:
+`scorer.ai_complete()` routes through one of two isolated **lanes**, each with its own
+circuit breakers per provider — a failure storm in one lane (e.g. a burst of CV
+generations) can't trip breakers that block the other (e.g. nightly scoring):
+
+- **`scoring` lane** (nightly job scoring only):
 
 ```
 Groq llama-3.3-70b  →  ~0.5s, free, 600 RPM
@@ -151,6 +155,11 @@ Claude Haiku 4-5    →  ~3s, reliable fallback
 score = 0 (job silently skipped this cycle, retried tomorrow)
 ```
 
+- **`interactive` lane** (everything else — premium features, CV/cover letter
+  generation, title-synonym expansion): same 3 providers, **Gemini first** instead
+  of Groq, so interactive traffic doesn't compete with nightly scoring for Groq's
+  600 RPM quota.
+
 Each provider has a circuit breaker: 4 consecutive failures → circuit opens for 120 seconds → half-open probe → recover.
 
 ### CV Generation
@@ -159,7 +168,7 @@ Each provider has a circuit breaker: 4 consecutive failures → circuit opens fo
 1. cv_parser.py         extracts plain text from uploaded PDF/DOCX
 2. cv_parser_structured parses the text into a complete role skeleton
 3. prompts.py           builds a prompt listing ALL N roles with explicit "include every one" instruction
-4. scorer.ai_complete() runs through Groq → Gemini → Haiku chain
+4. scorer.ai_complete(..., lane="interactive") runs through Gemini → Groq → Haiku chain
 5. cv_generator.py      validates output: if any roles missing, re-injects from step 2 skeleton
 6. docx_builder.py      renders the validated JSON into ATS-friendly DOCX (native Word styles)
 7. api/app.py           returns both DOCX files as base64 + triggers background email
@@ -260,6 +269,7 @@ Set these in Railway → Project → Variables.
 |----------|-------------|---------|
 | `RESEND_API_KEY` | Resend API key for email delivery | — |
 | `SERPER_API_KEY` | Serper web search — enriches red-flags and company-info endpoints | — |
+| `SERPAPI_KEY` | SerpApi Google Jobs — tried before DataForSEO for scraping, quota-guarded at 230/mo (free plan cap: 250/mo) | — |
 | `NOTIFY_DAILY` | Enable daily email digests | `true` |
 | `NOTIFY_WEEKLY` | Enable weekly digest (activate post-launch) | `false` |
 | `NOTIFY_INSTANT` | Enable instant high-score alerts (activate post-launch) | `false` |

@@ -77,7 +77,7 @@ def generate_cover_letter_docx(user, job):
     profile = user.get("profile_summary", "")
     cv_text = user.get("cv_text", "")
     raw = ai_complete(prompts.cover_letter_prompt(profile, cv_text, job),
-                      label="cover_letter", max_tokens=CL_MAX_TOKENS)
+                      label="cover_letter", max_tokens=CL_MAX_TOKENS, lane="interactive")
     data = _parse_json(raw)
     if not data or not any(data.get(k) for k in ("para1", "para2", "para3")):
         print(f"  ⚠️ Cover letter parse failed — raw: {str(raw)[:200]}")
@@ -103,7 +103,7 @@ def generate_cv_docx(user, job):
         return None, None, ""
     parsed = extract_structure(cv_text) if cv_text else {}
     raw = ai_complete(prompts.tailored_cv_prompt(profile, cv_text, job, parsed_structure=parsed),
-                      label="tailored_cv", max_tokens=CV_MAX_TOKENS)
+                      label="tailored_cv", max_tokens=CV_MAX_TOKENS, lane="interactive")
     data = _validate_and_repair(_parse_json(raw) or {}, parsed, user)
     name_slug, co_slug = _safe_name(user, job)
     try:

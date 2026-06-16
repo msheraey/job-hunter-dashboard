@@ -1,8 +1,12 @@
 """
-services/scorer.py — AI scoring chain: Groq (free, ~0.5s) → Gemini → Haiku.
-Circuit breakers per provider; one provider being down costs ~zero time.
-Single AI call returns score + reason + classification (industry/seniority/
-remote/visa) — classification enriches job_pool on first score.
+services/scorer.py — AI provider chain, split into isolated lanes so a
+failure storm in one feature can't trip breakers that block another:
+  - "scoring": Groq (free, ~0.5s) → Gemini → Haiku. Used by nightly job scoring.
+  - "interactive": Gemini → Groq → Haiku. Used by premium features, CV/cover
+    letter generation, and title-synonym expansion.
+Each lane has its own circuit breaker per provider; one provider being down
+costs ~zero time. Single scoring AI call returns score + reason + classification
+(industry/seniority/remote/visa) — classification enriches job_pool on first score.
 """
 import re
 import json
@@ -15,9 +19,13 @@ from utils.ai_json import extract_json
 from core.retry import CircuitBreaker, RateLimitError
 from core.db import safe_update
 
-groq_breaker   = CircuitBreaker("groq",   threshold=4, cooldown=120)
-gemini_breaker = CircuitBreaker("gemini", threshold=4, cooldown=120)
-haiku_breaker  = CircuitBreaker("haiku",  threshold=4, cooldown=180)
+groq_breaker_scoring     = CircuitBreaker("scoring_groq",     threshold=4, cooldown=120)
+gemini_breaker_scoring   = CircuitBreaker("scoring_gemini",   threshold=4, cooldown=120)
+haiku_breaker_scoring    = CircuitBreaker("scoring_haiku",    threshold=4, cooldown=180)
+
+groq_breaker_interactive   = CircuitBreaker("interactive_groq",   threshold=4, cooldown=120)
+gemini_breaker_interactive = CircuitBreaker("interactive_gemini", threshold=4, cooldown=120)
+haiku_breaker_interactive  = CircuitBreaker("interactive_haiku",  threshold=4, cooldown=180)
 
 INDUSTRY_MAP = {
     # Longer/more specific keys listed first for readability; map_industry uses longest-key-wins
@@ -148,16 +156,23 @@ def _call_haiku(prompt, max_tokens=200):
     return data["content"][0]["text"]
 
 
-PROVIDERS = [
-    ("groq",   groq_breaker,   _call_groq,   lambda: config.GROQ_API_KEY),
-    ("gemini", gemini_breaker, _call_gemini, lambda: config.GEMINI_API_KEY),
-    ("haiku",  haiku_breaker,  _call_haiku,  lambda: config.ANTHROPIC_API_KEY),
-]
+LANES = {
+    "scoring": [
+        ("groq",   groq_breaker_scoring,   _call_groq,   lambda: config.GROQ_API_KEY),
+        ("gemini", gemini_breaker_scoring, _call_gemini, lambda: config.GEMINI_API_KEY),
+        ("haiku",  haiku_breaker_scoring,  _call_haiku,  lambda: config.ANTHROPIC_API_KEY),
+    ],
+    "interactive": [
+        ("gemini", gemini_breaker_interactive, _call_gemini, lambda: config.GEMINI_API_KEY),
+        ("groq",   groq_breaker_interactive,   _call_groq,   lambda: config.GROQ_API_KEY),
+        ("haiku",  haiku_breaker_interactive,  _call_haiku,  lambda: config.ANTHROPIC_API_KEY),
+    ],
+}
 
 
-def ai_complete(prompt, label="ai", max_tokens=200):
-    """Run prompt through the provider chain. Returns raw text or None."""
-    for name, breaker, fn, has_key in PROVIDERS:
+def ai_complete(prompt, label="ai", max_tokens=200, lane="interactive"):
+    """Run prompt through the lane's provider chain. Returns raw text or None."""
+    for name, breaker, fn, has_key in LANES[lane]:
         if not has_key() or breaker.is_open():
             continue
         try:
@@ -166,10 +181,10 @@ def ai_complete(prompt, label="ai", max_tokens=200):
             return text
         except RateLimitError as e:
             # Rate-limited, not down — don't penalize the breaker, just move on.
-            print(f"    ⏳ {name} rate-limited for {label}: {str(e)[:80]}")
+            print(f"    ⏳ {name}/{lane} rate-limited for {label}: {str(e)[:80]}")
         except Exception as e:
             breaker.record_failure()
-            print(f"    ⚠️ {name} failed for {label}: {str(e)[:80]}")
+            print(f"    ⚠️ {name}/{lane} failed for {label}: {str(e)[:80]}")
     return None
 
 
@@ -178,7 +193,7 @@ def score_job(job, user_profile):
     prompt = prompts.scoring_prompt(
         job.get("title", ""), job.get("company", ""),
         job.get("description", ""), user_profile, ", ".join(config.INDUSTRY_LIST))
-    text = ai_complete(prompt, label="scoring", max_tokens=600)
+    text = ai_complete(prompt, label="scoring", max_tokens=600, lane="scoring")
     return parse_ai_json(text, title=job.get("title", ""), description=job.get("description", ""))
 
 

@@ -11,6 +11,7 @@ import config
 import prompts
 from services.scorer import ai_complete
 from core.db import safe_update, safe_select
+from core.retry import CircuitBreaker
 from utils.ai_json import extract_json as _parse_json
 
 # Token budgets per feature
@@ -22,35 +23,43 @@ SUMMARY_TOKENS    = 200
 SKILLS_GAP_TOKENS = 400
 COMPANY_TOKENS    = 300
 
+serper_breaker = CircuitBreaker("serper", threshold=3, cooldown=300)
+
 
 def _serper_search(query, num=5):
     """Optional live web context. Returns snippets text or ''."""
-    if not config.SERPER_API_KEY:
+    if not config.SERPER_API_KEY or serper_breaker.is_open():
         return ""
     try:
         r = requests.post("https://google.serper.dev/search",
                           headers={"X-API-KEY": config.SERPER_API_KEY, "Content-Type": "application/json"},
                           json={"q": query, "num": num}, timeout=10)
         if r.status_code != 200:
+            serper_breaker.record_failure()
             return ""
+        serper_breaker.record_success()
         organic = r.json().get("organic", [])
         return "\n".join(f"{o.get('title','')}: {o.get('snippet','')}" for o in organic[:num])
     except requests.RequestException:
+        serper_breaker.record_failure()
         return ""
 
 
 def _serper_first_link(query):
-    if not config.SERPER_API_KEY:
+    if not config.SERPER_API_KEY or serper_breaker.is_open():
         return None
     try:
         r = requests.post("https://google.serper.dev/search",
                           headers={"X-API-KEY": config.SERPER_API_KEY, "Content-Type": "application/json"},
                           json={"q": query, "num": 3}, timeout=10)
         if r.status_code != 200:
+            serper_breaker.record_failure()
             return None
+        serper_breaker.record_success()
         organic = r.json().get("organic", [])
         return organic[0]["link"] if organic else None
     except (requests.RequestException, KeyError, IndexError):
+        serper_breaker.record_failure()
         return None
 
 
@@ -59,7 +68,7 @@ def ats_score(user, job):
     if not cv_text:
         return {"error": "No CV uploaded — please upload your CV first for ATS analysis"}
     data = _parse_json(ai_complete(prompts.ats_score_prompt(cv_text, job),
-                                   label="ats", max_tokens=ATS_TOKENS))
+                                   label="ats", max_tokens=ATS_TOKENS, lane="interactive"))
     if not data:
         return {"error": "AI unavailable — try again shortly"}
     # Ensure label is present
@@ -72,7 +81,7 @@ def ats_score(user, job):
 
 def salary_estimate(job):
     data = _parse_json(ai_complete(prompts.salary_estimate_prompt(job),
-                                   label="salary", max_tokens=SALARY_TOKENS))
+                                   label="salary", max_tokens=SALARY_TOKENS, lane="interactive"))
     if not data:
         return {"error": "AI unavailable — try again shortly"}
     return data
@@ -84,7 +93,7 @@ def red_flags(job):
     if company and company != "Unknown":
         snippets = _serper_search(f'"{company}" UAE reviews complaints scam', num=5)
     data = _parse_json(ai_complete(prompts.red_flags_prompt(job, snippets),
-                                   label="red_flags", max_tokens=RED_FLAGS_TOKENS))
+                                   label="red_flags", max_tokens=RED_FLAGS_TOKENS, lane="interactive"))
     if data:
         data["live_search_used"] = bool(snippets)
         return data
@@ -96,7 +105,7 @@ def interview_prep(user, job):
     if not profile:
         return {"error": "Please add a profile summary or upload your CV first"}
     raw = ai_complete(prompts.interview_prep_prompt(job, profile),
-                      label="interview", max_tokens=INTERVIEW_TOKENS)
+                      label="interview", max_tokens=INTERVIEW_TOKENS, lane="interactive")
     data = _parse_json(raw)
     if not data:
         print(f"  ⚠️ interview_prep parse failed — raw: {str(raw)[:300]}")
@@ -121,7 +130,7 @@ def job_summary(job):
         except (json.JSONDecodeError, TypeError):
             pass
     raw = ai_complete(prompts.job_summary_prompt(job),
-                      label="job_summary", max_tokens=SUMMARY_TOKENS)
+                      label="job_summary", max_tokens=SUMMARY_TOKENS, lane="interactive")
     data = _parse_json(raw)
     if not data or not isinstance(data, list):
         return {"error": "AI unavailable — try again shortly"}
@@ -173,7 +182,7 @@ def skills_gap(user_id, user_titles):
                key=lambda x: -x[1]) if count >= 2 and kw not in stopwords][:40]
 
     data = _parse_json(ai_complete(prompts.skills_gap_prompt(missing, user_titles),
-                                   label="skills_gap", max_tokens=SKILLS_GAP_TOKENS))
+                                   label="skills_gap", max_tokens=SKILLS_GAP_TOKENS, lane="interactive"))
     if not data:
         return {"error": "AI unavailable — try again shortly"}
     return data
@@ -194,7 +203,7 @@ def company_info(job):
     # Always enrich with AI knowledge regardless of Serper
     ai_data = _parse_json(ai_complete(
         prompts.company_research_prompt(company, job.get("title", "")),
-        label="company_info", max_tokens=COMPANY_TOKENS))
+        label="company_info", max_tokens=COMPANY_TOKENS, lane="interactive"))
 
     return {
         "company": company,

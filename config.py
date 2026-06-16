@@ -16,6 +16,7 @@ GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY")
 ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY")
 RESEND_API_KEY      = os.environ.get("RESEND_API_KEY")
 SERPER_API_KEY      = os.environ.get("SERPER_API_KEY")  # optional — premium company lookup
+SERPAPI_KEY         = os.environ.get("SERPAPI_KEY")  # optional — SerpApi Google Jobs, tried before DataForSEO
 ADMIN_TOKEN         = os.environ.get("ADMIN_TOKEN")  # required to call admin trigger routes
 SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")  # Supabase project JWT secret (Settings → API)
 REDIS_URL           = os.environ.get("REDIS_URL")  # optional — shared circuit-breaker state across workers

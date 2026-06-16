@@ -1,7 +1,9 @@
 """
-services/scraper.py — DataForSEO scraping.
-PRIMARY: Live endpoint (synchronous, ~3-8s, no polling, no timeouts).
-FALLBACK: Async task_post/task_get (if Live errors), capped at TITLE_TIMEOUT_S.
+services/scraper.py — Job scraping, two providers.
+PRIMARY: SerpApi Google Jobs (quota-guarded, 230/mo before the 250/mo free-plan cap).
+FALLBACK: DataForSEO — Live endpoint (synchronous, ~3-8s) first, then async
+task_post/task_get (if Live errors), capped at TITLE_TIMEOUT_S. Used whenever
+SerpApi is unset, over quota, breaker-open, or itself fails.
 """
 import time
 import requests
@@ -9,13 +11,15 @@ import config
 from urllib.parse import quote
 from config import get_supabase
 from core.retry import CircuitBreaker
-from core.db import safe_select, safe_update, safe_insert
+from core.db import safe_select, safe_update, safe_insert, safe_upsert
 from utils.filters import (is_junk, is_nationality_restricted, normalize_title,
                            validate_title, make_fingerprint, is_gender_restricted,
                            infer_industry)
 from datetime import datetime, timezone, timedelta
 
 live_breaker = CircuitBreaker("dataforseo_live", threshold=3, cooldown=300)
+serpapi_breaker = CircuitBreaker("serpapi", threshold=3, cooldown=300)
+SERPAPI_MONTHLY_LIMIT = 230   # safety margin below the 250/mo free-plan hard cap
 
 def _payload(keyword):
     return [{
@@ -87,6 +91,69 @@ def _async_search(keyword, log):
             continue
     log("  ❌ Async: no results after all attempts")
     return []
+
+def _current_month():
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+def _serpapi_quota_available():
+    rows = safe_select("serpapi_usage", month=_current_month(), label="serpapi_quota")
+    used = rows[0]["call_count"] if rows else 0
+    return used < SERPAPI_MONTHLY_LIMIT
+
+def _serpapi_record_call():
+    month = _current_month()
+    rows = safe_select("serpapi_usage", month=month, label="serpapi_quota_read")
+    new_count = (rows[0]["call_count"] if rows else 0) + 1
+    safe_upsert("serpapi_usage",
+                {"month": month, "call_count": new_count,
+                 "updated_at": datetime.now(timezone.utc).isoformat()},
+                on_conflict="month", label="serpapi_quota_incr")
+
+def _serpapi_search(keyword, log):
+    """SerpApi Google Jobs — tried before DataForSEO, capped by a monthly quota."""
+    r = requests.get(
+        "https://serpapi.com/search",
+        params={"engine": "google_jobs", "q": keyword, "location": "United Arab Emirates",
+                "google_domain": "google.ae", "hl": "en", "api_key": config.SERPAPI_KEY},
+        timeout=config.LIVE_TIMEOUT_S,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"SerpApi HTTP {r.status_code}: {r.text[:150]}")
+    data = r.json()
+    if data.get("error"):
+        raise RuntimeError(f"SerpApi error: {data['error'][:150]}")
+    items = data.get("jobs_results") or []
+    log(f"  🔎 SerpApi: {len(items)} results")
+    return items
+
+def _serpapi_to_dataforseo_shape(item):
+    """Normalize a SerpApi job result into DataForSEO's item shape so save_jobs needs no changes."""
+    posted = (item.get("detected_extensions") or {}).get("posted_at")
+    link = (item.get("related_links") or [{}])[0].get("link") or item.get("share_link") or ""
+    return {
+        "title": item.get("title", ""),
+        "employer_name": item.get("company_name", "Unknown"),
+        "source_url": link,
+        "timestamp": posted,
+        "location": item.get("location", "UAE"),
+        "source_name": item.get("via", "Google Jobs"),
+        "description": item.get("description", ""),
+        "salary": item.get("salary", ""),
+    }
+
+def get_jobs_from_providers(keyword, log):
+    """SerpApi first (quota-guarded) → DataForSEO Live/async fallback, untouched."""
+    if config.SERPAPI_KEY and not serpapi_breaker.is_open() and _serpapi_quota_available():
+        try:
+            raw_items = _serpapi_search(keyword, log)
+            serpapi_breaker.record_success()
+            _serpapi_record_call()
+            if raw_items:
+                return [_serpapi_to_dataforseo_shape(i) for i in raw_items]
+        except Exception as e:
+            serpapi_breaker.record_failure()
+            log(f"  ⚠️ SerpApi failed ({str(e)[:100]}) — falling back to DataForSEO")
+    return dataforseo_search(keyword, log)
 
 def handle_pingback(task_id, keyword, log=print):
     """DataForSEO notified us a task finished — fetch + save its results.
@@ -219,7 +286,7 @@ def search_jobs(keyword, user_gender=None, logger=None):
         log("  ⚠️ Daily ceiling — stale cache")
         jobs = get_cached_jobs(keyword)
     else:
-        items = dataforseo_search(keyword, log)
+        items = get_jobs_from_providers(keyword, log)
         if items:
             saved = save_jobs(keyword, items, log)
             if logger:
