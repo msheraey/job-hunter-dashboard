@@ -16,6 +16,14 @@ GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY")
 ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY")
 RESEND_API_KEY      = os.environ.get("RESEND_API_KEY")
 SERPER_API_KEY      = os.environ.get("SERPER_API_KEY")  # optional — premium company lookup
+ADMIN_TOKEN         = os.environ.get("ADMIN_TOKEN")  # required to call admin trigger routes
+SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")  # Supabase project JWT secret (Settings → API)
+REDIS_URL           = os.environ.get("REDIS_URL")  # optional — shared circuit-breaker state across workers
+REQUIRE_AUTH        = os.environ.get("REQUIRE_AUTH", "false").lower() == "true"  # strict JWT enforcement once frontend sends tokens
+PUBLIC_BASE_URL     = os.environ.get("PUBLIC_BASE_URL")  # optional — this deployment's public URL, enables DataForSEO pingback
+
+# ── CORS ──────────────────────────────────────────────────────
+ALLOWED_ORIGINS = ["https://jobhunter.ae", "https://www.jobhunter.ae"]
 
 # ── Tuning constants ─────────────────────────────────────────
 TTL_HOURS            = 48     # re-scrape each title every 48h

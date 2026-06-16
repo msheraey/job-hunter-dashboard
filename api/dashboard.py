@@ -384,6 +384,12 @@ select:focus,input.txt:focus{border-color:var(--accent)}
           <div class="info"><h4>Force full reload</h4><p>Clear cached state and re-fetch everything.</p></div>
           <button class="btn ghost sm" onclick="location.reload()">__I_refresh__ Reload</button>
         </div>
+        <div class="set-row">
+          <div class="info"><h4>Admin token</h4><p>Required to run the scraper or trigger scoring/email. Stored only in this browser.</p></div>
+          <input type="password" id="adminTokenInput" placeholder="X-Admin-Token" autocomplete="off"
+                 style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 10px;font-family:'JetBrains Mono',monospace;font-size:12px;min-width:220px"
+                 oninput="localStorage.setItem('admin_token',this.value)">
+        </div>
       </div>
       <div class="card" style="max-width:680px;margin-top:14px">
         <h4 style="font-size:13.5px;font-weight:600;margin-bottom:10px">Endpoints in use</h4>
@@ -461,7 +467,11 @@ function toast(msg,kind){
 
 /* ── Fetch helpers ── */
 async function getJSON(u){const r=await fetch(u);if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}
-async function postJSON(u){const r=await fetch(u,{method:'POST'});if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}
+async function postJSON(u){
+  const t=localStorage.getItem('admin_token');
+  const r=await fetch(u,{method:'POST',headers:t?{'X-Admin-Token':t}:{}});
+  if(!r.ok)throw new Error('HTTP '+r.status);return r.json();
+}
 
 /* ── Tabs ── */
 const TITLES={dashboard:['Dashboard','Operational overview'],runs:['Runs','Scrape & scoring history'],
@@ -640,6 +650,7 @@ function setInterval2(ms){pollMs=+ms;if(pollTimer)clearInterval(pollTimer);if(po
 /* ── Init ── */
 $('#kpis').innerHTML=skeletonKpis(4);
 $('#apiBase').textContent=location.origin;
+$('#adminTokenInput').value=localStorage.getItem('admin_token')||'';
 const hash=(location.hash||'').replace('#','');
 if(hash&&TITLES[hash])switchTab(hash);
 refreshAll();
