@@ -38,6 +38,20 @@ def after_request(resp):
 def options_handler(path):
     return "", 204
 
+@app.route("/favicon.ico")
+def favicon():
+    """Serve an inline SVG favicon so browsers stop hitting the catch-all
+    OPTIONS route (which returned 405 for GET /favicon.ico)."""
+    from flask import Response
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+        '<rect width="32" height="32" rx="8" fill="#7C3AED"/>'
+        '<text x="16" y="22" text-anchor="middle" font-family="system-ui,sans-serif" '
+        'font-size="18" font-weight="700" fill="#fff">J</text></svg>'
+    )
+    return Response(svg, mimetype="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
 def _user(user_id):
     rows = safe_select("users", id=user_id)
     return rows[0] if rows else None
