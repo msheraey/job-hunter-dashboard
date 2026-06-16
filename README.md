@@ -264,12 +264,19 @@ Set these in Railway → Project → Variables.
 | `NOTIFY_WEEKLY` | Enable weekly digest (activate post-launch) | `false` |
 | `NOTIFY_INSTANT` | Enable instant high-score alerts (activate post-launch) | `false` |
 | `SEMANTIC_EXPAND` | Auto-generate synonym titles when user adds a title | `true` |
+| `ADMIN_TOKEN` | Shared secret required (`X-Admin-Token` header) to call `/api/run-scraper` and `/api/score-and-email`. Without it those routes return 503. | — |
+| `SUPABASE_JWT_SECRET` | Supabase project JWT secret (Settings → API → JWT Settings). Enables verifying bearer tokens on user-facing routes; without it, requests fall back to the legacy unauthenticated `user_id` in the body. | — |
+| `REDIS_URL` | Shares AI-provider circuit breaker state across Railway workers. Falls back to in-memory (per-worker) state when unset. | — |
+| `REQUIRE_AUTH` | Reserved for strict JWT enforcement once the frontend reliably sends tokens and Supabase Auth is reactivated. Currently informational only — not yet enforced in code. | `false` |
+| `PUBLIC_BASE_URL` | This deployment's public URL (e.g. the Railway domain). Enables the DataForSEO pingback webhook so late-finishing scrapes still get saved. | — |
 
 ---
 
 ## Database Setup
 
 Run `migrations.sql` **once** in Supabase → SQL Editor before deploying. Safe to re-run (all `IF NOT EXISTS`).
+
+`migrations_partition_old_jobs.sql` is a separate, optional, advanced migration — only run it once `old_jobs` has grown large enough that archiving/reads are slow. It rebuilds the table (RANGE-partitioned by month), so take a backup first; it is not part of the routine `migrations.sql` flow.
 
 ### Tables
 
@@ -305,16 +312,31 @@ Run `migrations.sql` **once** in Supabase → SQL Editor before deploying. Safe 
 ### Manual triggers
 
 ```bash
-# Via API (from any HTTP client)
-POST /api/run-scraper        # scrape only
-POST /api/score-and-email    # score + email all users
+# Via API (from any HTTP client) — requires X-Admin-Token: <ADMIN_TOKEN>
+curl -X POST https://<host>/api/run-scraper -H "X-Admin-Token: $ADMIN_TOKEN"
+curl -X POST https://<host>/api/score-and-email -H "X-Admin-Token: $ADMIN_TOKEN"
 ```
+
+The admin dashboard's Settings tab has an "Admin token" field that stores
+the token in the browser and attaches it automatically to these two buttons.
 
 ```bash
 # Direct (Railway console or SSH)
 python daily_job.py          # full daily run
 python daily_job.py weekly   # weekly digest (when NOTIFY_WEEKLY=true)
 ```
+
+### Auth rollout (JWT)
+
+The backend can verify Supabase JWTs (`core/jwt_auth.py`) but stays in
+lenient mode — it accepts the legacy unauthenticated `user_id` body field
+when no bearer token is present, so nothing breaks mid-rollout. To turn
+real auth on end-to-end:
+
+1. Set `SUPABASE_JWT_SECRET` in Railway (Supabase → Settings → API → JWT Settings)
+2. Reactivate Supabase Auth in the Supabase dashboard (currently suspended)
+3. Deploy the `jobhunterae` frontend patch that attaches `Authorization: Bearer <session token>` to API calls
+4. Once all three are live and verified, flip `REQUIRE_AUTH=true` and update the resolver to reject unauthenticated requests outright instead of falling back
 
 ### Health check after deploy
 
