@@ -1,9 +1,9 @@
 """
 core/jwt_auth.py — Supabase JWT verification (HS256, project JWT secret).
-Lenient/transitional: callers still pass user_id in the body; if a bearer
-token is present we verify it actually belongs to that user_id. Once the
-frontend reliably sends tokens and REQUIRE_AUTH=true, missing/invalid
-tokens are rejected outright instead of silently falling back.
+Callers still pass user_id in the body; if a bearer token is present we
+verify it actually belongs to that user_id. With REQUIRE_AUTH=true, a
+missing or invalid token is rejected outright instead of falling back to
+the unverified body user_id.
 """
 import jwt
 import config
@@ -33,13 +33,17 @@ def _bearer_token(request):
 def resolve_user_id(body, request):
     """Return (user_id, error_response_or_None).
 
-    - No token present → fall back to body.user_id (legacy/transitional).
+    - No token present:
+        - REQUIRE_AUTH=true  → reject.
+        - REQUIRE_AUTH=false → fall back to body.user_id (legacy/transitional).
     - Token present but invalid/expired → reject.
     - Token present and valid but doesn't match claimed body.user_id → reject.
     """
     claimed = body.get("user_id")
     token = _bearer_token(request)
     if not token:
+        if config.REQUIRE_AUTH:
+            return None, ({"error": "authorization required"}, 401)
         return claimed, None
     verified = verify_jwt(token)
     if not verified:

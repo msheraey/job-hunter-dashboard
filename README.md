@@ -267,7 +267,7 @@ Set these in Railway → Project → Variables.
 | `ADMIN_TOKEN` | Shared secret required (`X-Admin-Token` header) to call `/api/run-scraper` and `/api/score-and-email`. Without it those routes return 503. | — |
 | `SUPABASE_JWT_SECRET` | Supabase project JWT secret (Settings → API → JWT Settings). Enables verifying bearer tokens on user-facing routes; without it, requests fall back to the legacy unauthenticated `user_id` in the body. | — |
 | `REDIS_URL` | Shares AI-provider circuit breaker state across Railway workers. Falls back to in-memory (per-worker) state when unset. | — |
-| `REQUIRE_AUTH` | Reserved for strict JWT enforcement once the frontend reliably sends tokens and Supabase Auth is reactivated. Currently informational only — not yet enforced in code. | `false` |
+| `REQUIRE_AUTH` | When `true`, requests with no bearer token are rejected (401) instead of falling back to the legacy unauthenticated `user_id` body field. Flip once the frontend reliably sends tokens and Supabase Auth is reactivated. | `false` |
 | `PUBLIC_BASE_URL` | This deployment's public URL (e.g. the Railway domain). Enables the DataForSEO pingback webhook so late-finishing scrapes still get saved. | — |
 
 ---
@@ -328,15 +328,16 @@ python daily_job.py weekly   # weekly digest (when NOTIFY_WEEKLY=true)
 
 ### Auth rollout (JWT)
 
-The backend can verify Supabase JWTs (`core/jwt_auth.py`) but stays in
-lenient mode — it accepts the legacy unauthenticated `user_id` body field
-when no bearer token is present, so nothing breaks mid-rollout. To turn
-real auth on end-to-end:
+The backend can verify Supabase JWTs (`core/jwt_auth.py`) and, with
+`REQUIRE_AUTH=true`, rejects any request with no/invalid bearer token
+instead of falling back to the legacy unauthenticated `user_id` body
+field. Defaults to lenient mode (`REQUIRE_AUTH=false`) so nothing breaks
+mid-rollout. To turn real auth on end-to-end:
 
 1. Set `SUPABASE_JWT_SECRET` in Railway (Supabase → Settings → API → JWT Settings)
 2. Reactivate Supabase Auth in the Supabase dashboard (currently suspended)
-3. Deploy the `jobhunterae` frontend patch that attaches `Authorization: Bearer <session token>` to API calls
-4. Once all three are live and verified, flip `REQUIRE_AUTH=true` and update the resolver to reject unauthenticated requests outright instead of falling back
+3. Deploy the `jobhunterae` frontend patch that attaches `Authorization: Bearer <session token>` to API calls, **and** its 401-handling fix (sign out + redirect to `/login` on a 401) — without that fix, users with an expired/missing session will see a generic error instead of being sent to log in
+4. Once all three are confirmed live, flip `REQUIRE_AUTH=true` in Railway
 
 ### Health check after deploy
 
