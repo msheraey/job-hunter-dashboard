@@ -46,3 +46,10 @@ ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS salary_min_aed int;
 ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS salary_max_aed int;
 ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS summary_bullets text;  -- JSON array cached here
 ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS link_active boolean DEFAULT true;
+
+-- Indexes — hot read paths (per-title counts, archiving scan, match board/refresh queries)
+CREATE INDEX IF NOT EXISTS idx_job_pool_search_keyword ON job_pool (search_keyword);
+CREATE INDEX IF NOT EXISTS idx_job_pool_posted_at ON job_pool (posted_at);
+CREATE INDEX IF NOT EXISTS idx_ujm_user_status_score ON user_job_matches (user_id, status, score DESC);
+CREATE INDEX IF NOT EXISTS idx_ujm_job_id ON user_job_matches (job_id);
+CREATE INDEX IF NOT EXISTS idx_old_jobs_moved_at ON old_jobs (moved_at DESC);
