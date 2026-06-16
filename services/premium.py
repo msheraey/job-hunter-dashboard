@@ -11,6 +11,7 @@ import config
 import prompts
 from services.scorer import ai_complete
 from core.db import safe_update, safe_select
+from utils.ai_json import extract_json as _parse_json
 
 # Token budgets per feature
 ATS_TOKENS        = 600
@@ -20,19 +21,6 @@ INTERVIEW_TOKENS  = 900
 SUMMARY_TOKENS    = 200
 SKILLS_GAP_TOKENS = 400
 COMPANY_TOKENS    = 300
-
-
-def _parse_json(text):
-    if not text:
-        return None
-    cleaned = re.sub(r"```json|```", "", text).strip()
-    m = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return None
 
 
 def _serper_search(query, num=5):

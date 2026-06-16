@@ -12,31 +12,14 @@ Token budgets (critical — 200 was causing systematic truncation):
   Tailored CV:  2800 tokens (full JSON with all roles/bullets ~1200-2500 tokens)
 """
 import re
-import json
 import prompts
 from services.scorer import ai_complete
 from services.docx_builder import build_cv, build_cover_letter
 from services.cv_parser_structured import extract_structure
+from utils.ai_json import extract_json as _parse_json
 
 CV_MAX_TOKENS = 3200
 CL_MAX_TOKENS = 900
-
-
-def _parse_json(text):
-    if not text:
-        return None
-    cleaned = re.sub(r"```json|```", "", text).strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-    m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except json.JSONDecodeError:
-            pass
-    return None
 
 
 def _validate_and_repair(ai_data, parsed, user):
