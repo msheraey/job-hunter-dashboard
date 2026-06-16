@@ -311,24 +311,38 @@ select:focus,input.txt:focus{border-color:var(--accent)}
     <!-- ══ JOBS ══ -->
     <section class="tab-page" id="tab-jobs">
       <div class="grid kpis" id="jobsKpis" style="margin-bottom:18px"></div>
-      <div class="tbl-wrap">
-        <div class="empty">
-          <div class="eico">__I_brief__</div>
-          <h3>Job browser coming soon</h3>
-          <p>There's no read API for individual job records yet. The pool size above is live from <span class="mono" style="font-family:'JetBrains Mono',monospace">/api/analytics</span>. Add a <span class="mono" style="font-family:'JetBrains Mono',monospace">/api/jobs</span> endpoint to list and filter postings here.</p>
+      <div class="section-h">
+        <h2>Job pool</h2>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="hint" id="jobsPageInfo"></span>
+          <button class="btn ghost sm" onclick="jobsPage(-1)">&larr; Prev</button>
+          <button class="btn ghost sm" onclick="jobsPage(1)">Next &rarr;</button>
         </div>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Posted</th><th>Keyword</th><th></th></tr></thead>
+          <tbody id="jobsBody"></tbody>
+        </table>
       </div>
     </section>
 
     <!-- ══ USERS ══ -->
     <section class="tab-page" id="tab-users">
       <div class="grid kpis" id="usersKpis" style="margin-bottom:18px"></div>
-      <div class="tbl-wrap">
-        <div class="empty">
-          <div class="eico">__I_users__</div>
-          <h3>User directory coming soon</h3>
-          <p>No list endpoint for users exists yet — only aggregate counts via <span class="mono" style="font-family:'JetBrains Mono',monospace">/api/analytics</span>. Add a <span class="mono" style="font-family:'JetBrains Mono',monospace">/api/users</span> endpoint to manage accounts from here.</p>
+      <div class="section-h">
+        <h2>User directory</h2>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="hint" id="usersPageInfo"></span>
+          <button class="btn ghost sm" onclick="usersPage(-1)">&larr; Prev</button>
+          <button class="btn ghost sm" onclick="usersPage(1)">Next &rarr;</button>
         </div>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Email</th><th>Name</th><th>Notify</th><th>Last active</th><th>CV</th><th>Profile</th></tr></thead>
+          <tbody id="usersBody"></tbody>
+        </table>
       </div>
     </section>
 
@@ -362,6 +376,17 @@ select:focus,input.txt:focus{border-color:var(--accent)}
 
       <div class="section-h"><h2>DataForSEO credit</h2></div>
       <div class="grid kpis" id="creditBox"></div>
+
+      <div class="section-h"><h2>Circuit breakers</h2><span class="hint">Open = provider skipped, failing fast</span></div>
+      <div class="grid health-grid" id="breakersGrid"></div>
+
+      <div class="section-h"><h2>Recent errors</h2><span class="hint">Live-request and breaker failures, newest first</span></div>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>Source</th><th>Message</th></tr></thead>
+          <tbody id="errorLogBody"></tbody>
+        </table>
+      </div>
     </section>
 
     <!-- ══ SETTINGS ══ -->
@@ -384,13 +409,20 @@ select:focus,input.txt:focus{border-color:var(--accent)}
           <div class="info"><h4>Force full reload</h4><p>Clear cached state and re-fetch everything.</p></div>
           <button class="btn ghost sm" onclick="location.reload()">__I_refresh__ Reload</button>
         </div>
+        <div class="set-row">
+          <div class="info"><h4>Admin token</h4><p>Required to run the scraper or trigger scoring/email. Stored only in this browser.</p></div>
+          <input type="password" id="adminTokenInput" placeholder="X-Admin-Token" autocomplete="off"
+                 style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 10px;font-family:'JetBrains Mono',monospace;font-size:12px;min-width:220px"
+                 oninput="localStorage.setItem('admin_token',this.value)">
+        </div>
       </div>
       <div class="card" style="max-width:680px;margin-top:14px">
         <h4 style="font-size:13.5px;font-weight:600;margin-bottom:10px">Endpoints in use</h4>
         <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);line-height:2">
           <div>GET&nbsp;&nbsp;/api/analytics</div>
-          <div>GET&nbsp;&nbsp;/api/system-health</div>
-          <div>GET&nbsp;&nbsp;/api/logs · /api/logs/&lt;id&gt;</div>
+          <div>GET&nbsp;&nbsp;/api/system-health · /api/breaker-status</div>
+          <div>GET&nbsp;&nbsp;/api/logs · /api/logs/&lt;id&gt; · /api/error-log</div>
+          <div>GET&nbsp;&nbsp;/api/jobs · /api/users (admin)</div>
           <div>POST /api/run-scraper · /api/score-and-email</div>
         </div>
       </div>
@@ -446,7 +478,7 @@ document.body.innerHTML=document.body.innerHTML.replace(/__I_(\w+)__/g,(_,k)=>IC
 
 const $=s=>document.querySelector(s);
 const $$=s=>document.querySelectorAll(s);
-let state={analytics:null,health:null,logs:null};
+let state={analytics:null,health:null,logs:null,jobsOffset:0,usersOffset:0,PAGE_SIZE:50};
 let pollTimer=null,pollMs=30000;
 let charts={};
 
@@ -461,7 +493,16 @@ function toast(msg,kind){
 
 /* ── Fetch helpers ── */
 async function getJSON(u){const r=await fetch(u);if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}
-async function postJSON(u){const r=await fetch(u,{method:'POST'});if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}
+async function getJSONAuth(u){
+  const t=localStorage.getItem('admin_token');
+  const r=await fetch(u,{headers:t?{'X-Admin-Token':t}:{}});
+  if(!r.ok)throw new Error('HTTP '+r.status);return r.json();
+}
+async function postJSON(u){
+  const t=localStorage.getItem('admin_token');
+  const r=await fetch(u,{method:'POST',headers:t?{'X-Admin-Token':t}:{}});
+  if(!r.ok)throw new Error('HTTP '+r.status);return r.json();
+}
 
 /* ── Tabs ── */
 const TITLES={dashboard:['Dashboard','Operational overview'],runs:['Runs','Scrape & scoring history'],
@@ -473,6 +514,9 @@ function switchTab(name){
   $('#pageTitle').textContent=TITLES[name][0];
   $('#pageCrumb').textContent=TITLES[name][1];
   if(name==='analytics')drawCharts();
+  if(name==='jobs'&&!state.jobsLoaded){state.jobsLoaded=true;loadJobs();}
+  if(name==='users'&&!state.usersLoaded){state.usersLoaded=true;loadUsers();}
+  if(name==='diagnostics'&&!state.diagLoaded){state.diagLoaded=true;loadBreakers();loadErrorLog();}
   location.hash=name;
 }
 $('#nav').addEventListener('click',e=>{const b=e.target.closest('button[data-tab]');if(b)switchTab(b.dataset.tab);});
@@ -549,6 +593,86 @@ function renderRuns(){
 function ts(s){if(!s)return '—';return String(s).slice(0,16).replace('T',' ');}
 function duration(a,b){if(!a||!b)return '—';const d=(new Date(b)-new Date(a))/1000;if(isNaN(d)||d<0)return '—';
   if(d<60)return Math.round(d)+'s';return Math.floor(d/60)+'m '+Math.round(d%60)+'s';}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+/* ── Jobs ── */
+function renderJobs(){
+  const d=state.jobs;if(!d)return;
+  const rows=d.jobs||[];
+  if(!rows.length){
+    $('#jobsBody').innerHTML='<tr><td colspan="6"><div class="empty"><h3>No jobs found</h3><p>Run the scraper to populate the pool.</p></div></td></tr>';
+  }else{
+    $('#jobsBody').innerHTML=rows.map(j=>
+      '<tr><td>'+esc(j.title)+'</td><td>'+esc(j.company)+'</td><td>'+esc(j.location||'UAE')+'</td>'+
+      '<td><span class="mono">'+ts(j.posted_at)+'</span></td><td>'+esc(j.search_keyword)+'</td>'+
+      '<td style="text-align:right">'+(j.link?'<a href="'+esc(j.link)+'" target="_blank" rel="noopener" class="btn ghost sm">Open</a>':'')+'</td></tr>'
+    ).join('');
+  }
+  const total=d.total||0,page=Math.floor(state.jobsOffset/state.PAGE_SIZE)+1,pages=Math.max(1,Math.ceil(total/state.PAGE_SIZE));
+  $('#jobsPageInfo').textContent='Page '+page+' of '+pages+' ('+fmt(total)+' total)';
+}
+async function loadJobs(){
+  try{state.jobs=await getJSON('/api/jobs?limit='+state.PAGE_SIZE+'&offset='+state.jobsOffset);renderJobs();}
+  catch(e){toast('Jobs failed','err');}
+}
+function jobsPage(dir){
+  const next=state.jobsOffset+dir*state.PAGE_SIZE;
+  if(next<0)return;
+  state.jobsOffset=next;loadJobs();
+}
+
+/* ── Users ── */
+function renderUsers(){
+  const rows=state.users;if(!rows)return;
+  if(!rows.length){
+    $('#usersBody').innerHTML='<tr><td colspan="6"><div class="empty"><h3>No users found</h3></div></td></tr>';
+  }else{
+    $('#usersBody').innerHTML=rows.map(u=>
+      '<tr><td>'+esc(u.email)+'</td><td>'+esc(u.name||'—')+'</td><td>'+esc(u.notify_pref||'—')+'</td>'+
+      '<td><span class="mono">'+ts(u.last_active)+'</span></td>'+
+      '<td><span class="badge '+(u.has_cv?'g':'r')+'">'+(u.has_cv?'Yes':'No')+'</span></td>'+
+      '<td><span class="badge '+(u.has_profile?'g':'r')+'">'+(u.has_profile?'Yes':'No')+'</span></td></tr>'
+    ).join('');
+  }
+  $('#usersPageInfo').textContent='Page '+(Math.floor(state.usersOffset/state.PAGE_SIZE)+1);
+}
+async function loadUsers(){
+  try{state.users=await getJSONAuth('/api/users?limit='+state.PAGE_SIZE+'&offset='+state.usersOffset);renderUsers();}
+  catch(e){toast('Users failed — check admin token in Settings','err');}
+}
+function usersPage(dir){
+  const next=state.usersOffset+dir*state.PAGE_SIZE;
+  if(next<0)return;
+  state.usersOffset=next;loadUsers();
+}
+
+/* ── Diagnostics: breakers + error log ── */
+function renderBreakers(){
+  const rows=state.breakers;if(!rows)return;
+  if(!rows.length){$('#breakersGrid').innerHTML='<div class="empty"><h3>No breakers registered</h3></div>';return;}
+  $('#breakersGrid').innerHTML=rows.map(b=>
+    healthCardHTML(b.name,{ok:!b.open,msg:b.open?'open — skipping for '+b.cooldown+'s':'closed'})
+  ).join('');
+}
+async function loadBreakers(){
+  try{state.breakers=await getJSON('/api/breaker-status');renderBreakers();}
+  catch(e){toast('Breaker status failed','err');}
+}
+function renderErrorLog(){
+  const rows=state.errorLog;if(!rows)return;
+  if(!rows.length){
+    $('#errorLogBody').innerHTML='<tr><td colspan="3"><div class="empty"><h3>No errors logged</h3><p>Nothing has failed since this table was added.</p></div></td></tr>';
+    return;
+  }
+  $('#errorLogBody').innerHTML=rows.map(r=>
+    '<tr><td><span class="mono">'+ts(r.created_at)+'</span></td><td>'+esc(r.source)+'</td>'+
+    '<td>'+esc(r.message)+(r.context?' <span style="color:var(--text-faint)">('+esc(r.context)+')</span>':'')+'</td></tr>'
+  ).join('');
+}
+async function loadErrorLog(){
+  try{state.errorLog=await getJSON('/api/error-log?limit=50');renderErrorLog();}
+  catch(e){toast('Error log failed','err');}
+}
 
 /* ── Charts ── */
 function chartOpts(extra){return Object.assign({responsive:true,maintainAspectRatio:false,
@@ -640,6 +764,7 @@ function setInterval2(ms){pollMs=+ms;if(pollTimer)clearInterval(pollTimer);if(po
 /* ── Init ── */
 $('#kpis').innerHTML=skeletonKpis(4);
 $('#apiBase').textContent=location.origin;
+$('#adminTokenInput').value=localStorage.getItem('admin_token')||'';
 const hash=(location.hash||'').replace('#','');
 if(hash&&TITLES[hash])switchTab(hash);
 refreshAll();

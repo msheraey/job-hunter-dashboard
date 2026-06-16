@@ -46,3 +46,30 @@ ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS salary_min_aed int;
 ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS salary_max_aed int;
 ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS summary_bullets text;  -- JSON array cached here
 ALTER TABLE job_pool ADD COLUMN IF NOT EXISTS link_active boolean DEFAULT true;
+
+-- Indexes — hot read paths (per-title counts, archiving scan, match board/refresh queries)
+CREATE INDEX IF NOT EXISTS idx_job_pool_search_keyword ON job_pool (search_keyword);
+CREATE INDEX IF NOT EXISTS idx_job_pool_posted_at ON job_pool (posted_at);
+CREATE INDEX IF NOT EXISTS idx_ujm_user_status_score ON user_job_matches (user_id, status, score DESC);
+CREATE INDEX IF NOT EXISTS idx_ujm_job_id ON user_job_matches (job_id);
+CREATE INDEX IF NOT EXISTS idx_old_jobs_moved_at ON old_jobs (moved_at DESC);
+
+-- SerpApi monthly quota tracking (free plan: 250 searches/month)
+CREATE TABLE IF NOT EXISTS serpapi_usage (
+  month text PRIMARY KEY,        -- 'YYYY-MM'
+  call_count int NOT NULL DEFAULT 0,
+  updated_at timestamptz DEFAULT now()
+);
+
+-- Centralized error capture (live-request + breaker failures that bare print()'d before)
+CREATE TABLE IF NOT EXISTS error_log (
+  id bigserial PRIMARY KEY,
+  created_at timestamptz DEFAULT now(),
+  source text NOT NULL,     -- e.g. 'matcher._user_titles', 'circuit_breaker'
+  message text NOT NULL,
+  context text               -- short extra detail; never PII/secrets
+);
+CREATE INDEX IF NOT EXISTS idx_error_log_created_at ON error_log (created_at DESC);
+
+-- Persist RunLogger's existing in-memory error counter (was tracked, never saved)
+ALTER TABLE scrape_logs ADD COLUMN IF NOT EXISTS error_count int DEFAULT 0;

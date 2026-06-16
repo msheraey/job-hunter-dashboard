@@ -1,8 +1,12 @@
 """
-services/scorer.py — AI scoring chain: Groq (free, ~0.5s) → Gemini → Haiku.
-Circuit breakers per provider; one provider being down costs ~zero time.
-Single AI call returns score + reason + classification (industry/seniority/
-remote/visa) — classification enriches job_pool on first score.
+services/scorer.py — AI provider chain, split into isolated lanes so a
+failure storm in one feature can't trip breakers that block another:
+  - "scoring": Groq (free, ~0.5s) → Gemini → Haiku. Used by nightly job scoring.
+  - "interactive": Gemini → Groq → Haiku. Used by premium features, CV/cover
+    letter generation, and title-synonym expansion.
+Each lane has its own circuit breaker per provider; one provider being down
+costs ~zero time. Single scoring AI call returns score + reason + classification
+(industry/seniority/remote/visa) — classification enriches job_pool on first score.
 """
 import re
 import json
@@ -11,12 +15,17 @@ import requests
 import config
 import prompts
 from utils.filters import infer_industry
-from core.retry import CircuitBreaker
+from utils.ai_json import extract_json
+from core.retry import CircuitBreaker, RateLimitError
 from core.db import safe_update
 
-groq_breaker   = CircuitBreaker("groq",   threshold=4, cooldown=120)
-gemini_breaker = CircuitBreaker("gemini", threshold=4, cooldown=120)
-haiku_breaker  = CircuitBreaker("haiku",  threshold=4, cooldown=180)
+groq_breaker_scoring     = CircuitBreaker("scoring_groq",     threshold=4, cooldown=120)
+gemini_breaker_scoring   = CircuitBreaker("scoring_gemini",   threshold=4, cooldown=120)
+haiku_breaker_scoring    = CircuitBreaker("scoring_haiku",    threshold=4, cooldown=180)
+
+groq_breaker_interactive   = CircuitBreaker("interactive_groq",   threshold=4, cooldown=120)
+gemini_breaker_interactive = CircuitBreaker("interactive_gemini", threshold=4, cooldown=120)
+haiku_breaker_interactive  = CircuitBreaker("interactive_haiku",  threshold=4, cooldown=180)
 
 INDUSTRY_MAP = {
     # Longer/more specific keys listed first for readability; map_industry uses longest-key-wins
@@ -60,39 +69,35 @@ def parse_ai_json(text, title="", description=""):
     if not text:
         out["industry"] = infer_industry(title, description)
         return out
-    cleaned = re.sub(r"```json|```", "", text).strip()
-    m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if m:
-        try:
-            data = json.loads(m.group(0))
-            v = data.get("score")
-            if v is not None:
-                try:
-                    out["score"] = max(0, min(100, int(v)))
-                except (ValueError, TypeError):
-                    pass
-            out["industry"] = map_industry(data.get("industry"))
-            # New bullet format: match_bullets + gap_bullets
-            mb = data.get("match_bullets") or []
-            gb = data.get("gap_bullets") or []
-            if isinstance(mb, list) and mb:
-                match_b = [str(b).strip() for b in mb[:5] if b]
-                if not isinstance(gb, list):
-                    print(f"  ⚠️ gap_bullets wrong type ({type(gb).__name__}) — discarding")
-                    gb = []
-                gap_b = [str(b).strip() for b in gb[:4] if b]
-                out["reason"] = json.dumps({"m": match_b, "g": gap_b})
-            else:
-                # Legacy plain-string reason
-                r = data.get("reason")
-                out["reason"] = str(r).strip()[:300] if r else None
-            out["seniority"] = data.get("seniority")
-            out["remote"] = data.get("remote")
-            out["visa_likelihood"] = data.get("visa_likelihood")
-        except json.JSONDecodeError:
-            pass
+    data = extract_json(text)
+    if isinstance(data, dict):
+        v = data.get("score")
+        if v is not None:
+            try:
+                out["score"] = max(0, min(100, int(v)))
+            except (ValueError, TypeError):
+                pass
+        out["industry"] = map_industry(data.get("industry"))
+        # New bullet format: match_bullets + gap_bullets
+        mb = data.get("match_bullets") or []
+        gb = data.get("gap_bullets") or []
+        if isinstance(mb, list) and mb:
+            match_b = [str(b).strip() for b in mb[:5] if b]
+            if not isinstance(gb, list):
+                print(f"  ⚠️ gap_bullets wrong type ({type(gb).__name__}) — discarding")
+                gb = []
+            gap_b = [str(b).strip() for b in gb[:4] if b]
+            out["reason"] = json.dumps({"m": match_b, "g": gap_b})
+        else:
+            # Legacy plain-string reason
+            r = data.get("reason")
+            out["reason"] = str(r).strip()[:300] if r else None
+        out["seniority"] = data.get("seniority")
+        out["remote"] = data.get("remote")
+        out["visa_likelihood"] = data.get("visa_likelihood")
     if out["score"] is None:
         # Prefer a number explicitly labelled as a score over any arbitrary number
+        cleaned = re.sub(r"```json|```", "", text).strip()
         m2 = re.search(r'"score"\s*:\s*(\d+)', cleaned)
         if not m2:
             m2 = re.search(r'\bscore\b["\s:]*(\d+)', cleaned, re.IGNORECASE)
@@ -115,7 +120,7 @@ def _call_groq(prompt, max_tokens=200):
         timeout=30,
     )
     if r.status_code == 429:
-        raise RuntimeError("groq 429")
+        raise RateLimitError("groq 429")
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]
 
@@ -128,7 +133,7 @@ def _call_gemini(prompt, max_tokens=200):
         timeout=30,
     )
     if r.status_code == 429:
-        raise RuntimeError("gemini 429")
+        raise RateLimitError("gemini 429")
     r.raise_for_status()
     return r.json()["candidates"][0]["content"]["parts"][0]["text"]
 
@@ -143,7 +148,7 @@ def _call_haiku(prompt, max_tokens=200):
         timeout=30,
     )
     if r.status_code == 429:
-        raise RuntimeError("haiku 429")
+        raise RateLimitError("haiku 429")
     r.raise_for_status()
     data = r.json()
     if "content" not in data:
@@ -151,25 +156,35 @@ def _call_haiku(prompt, max_tokens=200):
     return data["content"][0]["text"]
 
 
-PROVIDERS = [
-    ("groq",   groq_breaker,   _call_groq,   lambda: config.GROQ_API_KEY),
-    ("gemini", gemini_breaker, _call_gemini, lambda: config.GEMINI_API_KEY),
-    ("haiku",  haiku_breaker,  _call_haiku,  lambda: config.ANTHROPIC_API_KEY),
-]
+LANES = {
+    "scoring": [
+        ("groq",   groq_breaker_scoring,   _call_groq,   lambda: config.GROQ_API_KEY),
+        ("gemini", gemini_breaker_scoring, _call_gemini, lambda: config.GEMINI_API_KEY),
+        ("haiku",  haiku_breaker_scoring,  _call_haiku,  lambda: config.ANTHROPIC_API_KEY),
+    ],
+    "interactive": [
+        ("gemini", gemini_breaker_interactive, _call_gemini, lambda: config.GEMINI_API_KEY),
+        ("groq",   groq_breaker_interactive,   _call_groq,   lambda: config.GROQ_API_KEY),
+        ("haiku",  haiku_breaker_interactive,  _call_haiku,  lambda: config.ANTHROPIC_API_KEY),
+    ],
+}
 
 
-def ai_complete(prompt, label="ai", max_tokens=200):
-    """Run prompt through the provider chain. Returns raw text or None."""
-    for name, breaker, fn, has_key in PROVIDERS:
+def ai_complete(prompt, label="ai", max_tokens=200, lane="interactive"):
+    """Run prompt through the lane's provider chain. Returns raw text or None."""
+    for name, breaker, fn, has_key in LANES[lane]:
         if not has_key() or breaker.is_open():
             continue
         try:
             text = fn(prompt, max_tokens)
             breaker.record_success()
             return text
+        except RateLimitError as e:
+            # Rate-limited, not down — don't penalize the breaker, just move on.
+            print(f"    ⏳ {name}/{lane} rate-limited for {label}: {str(e)[:80]}")
         except Exception as e:
             breaker.record_failure()
-            print(f"    ⚠️ {name} failed for {label}: {str(e)[:80]}")
+            print(f"    ⚠️ {name}/{lane} failed for {label}: {str(e)[:80]}")
     return None
 
 
@@ -178,7 +193,7 @@ def score_job(job, user_profile):
     prompt = prompts.scoring_prompt(
         job.get("title", ""), job.get("company", ""),
         job.get("description", ""), user_profile, ", ".join(config.INDUSTRY_LIST))
-    text = ai_complete(prompt, label="scoring", max_tokens=600)
+    text = ai_complete(prompt, label="scoring", max_tokens=600, lane="scoring")
     return parse_ai_json(text, title=job.get("title", ""), description=job.get("description", ""))
 
 

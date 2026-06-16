@@ -6,6 +6,7 @@ import json
 import os
 import resend
 from datetime import datetime, timezone, timedelta
+from core.error_log import log_error
 
 resend.api_key = os.environ.get("RESEND_API_KEY")
 FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "onboarding@resend.dev")
@@ -283,6 +284,7 @@ def send_job_matches_email(user_email, user_name, jobs, is_catchup=False):
         return True
     except Exception as e:
         print(f"  ❌ Email error for {user_email}: {e}")
+        log_error("email_service.send_job_matches_email", str(e))
         return False
 
 
@@ -324,4 +326,5 @@ def send_cv_cover_letter_email(user_email, user_name, job_title, company,
         return True
     except Exception as e:
         print(f"  ❌ CV email error: {e}")
+        log_error("email_service.send_cv_cover_letter_email", str(e))
         return False

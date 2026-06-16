@@ -43,6 +43,7 @@ class RunLogger:
                 "log_text": "\n".join(self.lines[-500:]),
                 "total_scraped": self.total_scraped,
                 "total_saved": self.total_saved,
+                "error_count": self.errors,
             }).eq("id", self.log_id).execute()
         except Exception as e:
             print(f"⚠️ Log flush error: {e}")
@@ -57,6 +58,7 @@ class RunLogger:
                 "log_text": "\n".join(self.lines[-500:]),
                 "total_scraped": self.total_scraped,
                 "total_saved": self.total_saved,
+                "error_count": self.errors,
             }
             if error:
                 upd["error"] = str(error)[:1000]

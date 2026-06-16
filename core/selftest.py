@@ -29,6 +29,16 @@ def check_dataforseo():
     except Exception as e:
         return {"ok": False, "msg": str(e)[:200]}
 
+def check_serpapi():
+    if not config.SERPAPI_KEY:
+        return {"ok": False, "msg": "key not set"}
+    try:
+        r = requests.get("https://serpapi.com/account",
+                         params={"api_key": config.SERPAPI_KEY}, timeout=10)
+        return {"ok": r.status_code == 200, "msg": "ready" if r.status_code == 200 else f"HTTP {r.status_code}"}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)[:200]}
+
 def check_groq():
     if not config.GROQ_API_KEY:
         return {"ok": False, "msg": "key not set"}
@@ -62,6 +72,7 @@ def run_all():
     results = {
         "supabase":   check_supabase(),
         "dataforseo": check_dataforseo(),
+        "serpapi":    check_serpapi(),
         "groq":       check_groq(),
         "gemini":     check_gemini(),
         "anthropic":  check_anthropic(),

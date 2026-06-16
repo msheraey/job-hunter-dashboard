@@ -86,8 +86,8 @@ jobhunter/
 │   └── selftest.py          Startup health checks — tests every API before running
 │
 ├── services/                Business logic — one responsibility per file
-│   ├── scraper.py           DataForSEO Live (primary) + Async (fallback), TTL cache
-│   ├── scorer.py            AI scoring: Groq → Gemini → Haiku chain
+│   ├── scraper.py           SerpApi (primary) + DataForSEO Live/Async (fallback), TTL cache
+│   ├── scorer.py            AI provider chain, isolated scoring/interactive lanes
 │   ├── matcher.py           Per-user match orchestration (search + score + save)
 │   ├── classifier.py        Job quality score — heuristic, zero AI cost
 │   ├── synonyms.py          Semantic title expansion (AI-generated synonyms per title)
@@ -139,7 +139,11 @@ If any core dependency (Supabase, DataForSEO) fails the self-test, the run abort
 
 ### Scoring Chain
 
-Each job goes through the following chain until a score is returned:
+`scorer.ai_complete()` routes through one of two isolated **lanes**, each with its own
+circuit breakers per provider — a failure storm in one lane (e.g. a burst of CV
+generations) can't trip breakers that block the other (e.g. nightly scoring):
+
+- **`scoring` lane** (nightly job scoring only):
 
 ```
 Groq llama-3.3-70b  →  ~0.5s, free, 600 RPM
@@ -151,6 +155,11 @@ Claude Haiku 4-5    →  ~3s, reliable fallback
 score = 0 (job silently skipped this cycle, retried tomorrow)
 ```
 
+- **`interactive` lane** (everything else — premium features, CV/cover letter
+  generation, title-synonym expansion): same 3 providers, **Gemini first** instead
+  of Groq, so interactive traffic doesn't compete with nightly scoring for Groq's
+  600 RPM quota.
+
 Each provider has a circuit breaker: 4 consecutive failures → circuit opens for 120 seconds → half-open probe → recover.
 
 ### CV Generation
@@ -159,7 +168,7 @@ Each provider has a circuit breaker: 4 consecutive failures → circuit opens fo
 1. cv_parser.py         extracts plain text from uploaded PDF/DOCX
 2. cv_parser_structured parses the text into a complete role skeleton
 3. prompts.py           builds a prompt listing ALL N roles with explicit "include every one" instruction
-4. scorer.ai_complete() runs through Groq → Gemini → Haiku chain
+4. scorer.ai_complete(..., lane="interactive") runs through Gemini → Groq → Haiku chain
 5. cv_generator.py      validates output: if any roles missing, re-injects from step 2 skeleton
 6. docx_builder.py      renders the validated JSON into ATS-friendly DOCX (native Word styles)
 7. api/app.py           returns both DOCX files as base64 + triggers background email
@@ -260,16 +269,24 @@ Set these in Railway → Project → Variables.
 |----------|-------------|---------|
 | `RESEND_API_KEY` | Resend API key for email delivery | — |
 | `SERPER_API_KEY` | Serper web search — enriches red-flags and company-info endpoints | — |
+| `SERPAPI_KEY` | SerpApi Google Jobs — tried before DataForSEO for scraping, quota-guarded at 230/mo (free plan cap: 250/mo) | — |
 | `NOTIFY_DAILY` | Enable daily email digests | `true` |
 | `NOTIFY_WEEKLY` | Enable weekly digest (activate post-launch) | `false` |
 | `NOTIFY_INSTANT` | Enable instant high-score alerts (activate post-launch) | `false` |
 | `SEMANTIC_EXPAND` | Auto-generate synonym titles when user adds a title | `true` |
+| `ADMIN_TOKEN` | Shared secret required (`X-Admin-Token` header) to call `/api/run-scraper` and `/api/score-and-email`. Without it those routes return 503. | — |
+| `SUPABASE_JWT_SECRET` | Supabase project JWT secret (Settings → API → JWT Settings). Enables verifying bearer tokens on user-facing routes; without it, requests fall back to the legacy unauthenticated `user_id` in the body. | — |
+| `REDIS_URL` | Shares AI-provider circuit breaker state across Railway workers. Falls back to in-memory (per-worker) state when unset. | — |
+| `REQUIRE_AUTH` | When `true`, requests with no bearer token are rejected (401) instead of falling back to the legacy unauthenticated `user_id` body field. Flip once the frontend reliably sends tokens and Supabase Auth is reactivated. | `false` |
+| `PUBLIC_BASE_URL` | This deployment's public URL (e.g. the Railway domain). Enables the DataForSEO pingback webhook so late-finishing scrapes still get saved. | — |
 
 ---
 
 ## Database Setup
 
 Run `migrations.sql` **once** in Supabase → SQL Editor before deploying. Safe to re-run (all `IF NOT EXISTS`).
+
+`migrations_partition_old_jobs.sql` is a separate, optional, advanced migration — only run it once `old_jobs` has grown large enough that archiving/reads are slow. It rebuilds the table (RANGE-partitioned by month), so take a backup first; it is not part of the routine `migrations.sql` flow.
 
 ### Tables
 
@@ -305,16 +322,32 @@ Run `migrations.sql` **once** in Supabase → SQL Editor before deploying. Safe 
 ### Manual triggers
 
 ```bash
-# Via API (from any HTTP client)
-POST /api/run-scraper        # scrape only
-POST /api/score-and-email    # score + email all users
+# Via API (from any HTTP client) — requires X-Admin-Token: <ADMIN_TOKEN>
+curl -X POST https://<host>/api/run-scraper -H "X-Admin-Token: $ADMIN_TOKEN"
+curl -X POST https://<host>/api/score-and-email -H "X-Admin-Token: $ADMIN_TOKEN"
 ```
+
+The admin dashboard's Settings tab has an "Admin token" field that stores
+the token in the browser and attaches it automatically to these two buttons.
 
 ```bash
 # Direct (Railway console or SSH)
 python daily_job.py          # full daily run
 python daily_job.py weekly   # weekly digest (when NOTIFY_WEEKLY=true)
 ```
+
+### Auth rollout (JWT)
+
+The backend can verify Supabase JWTs (`core/jwt_auth.py`) and, with
+`REQUIRE_AUTH=true`, rejects any request with no/invalid bearer token
+instead of falling back to the legacy unauthenticated `user_id` body
+field. Defaults to lenient mode (`REQUIRE_AUTH=false`) so nothing breaks
+mid-rollout. To turn real auth on end-to-end:
+
+1. Set `SUPABASE_JWT_SECRET` in Railway (Supabase → Settings → API → JWT Settings)
+2. Reactivate Supabase Auth in the Supabase dashboard (currently suspended)
+3. Deploy the `jobhunterae` frontend patch that attaches `Authorization: Bearer <session token>` to API calls, **and** its 401-handling fix (sign out + redirect to `/login` on a 401) — without that fix, users with an expired/missing session will see a generic error instead of being sent to log in
+4. Once all three are confirmed live, flip `REQUIRE_AUTH=true` in Railway
 
 ### Health check after deploy
 

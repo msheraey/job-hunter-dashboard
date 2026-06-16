@@ -12,31 +12,14 @@ Token budgets (critical — 200 was causing systematic truncation):
   Tailored CV:  2800 tokens (full JSON with all roles/bullets ~1200-2500 tokens)
 """
 import re
-import json
 import prompts
 from services.scorer import ai_complete
 from services.docx_builder import build_cv, build_cover_letter
 from services.cv_parser_structured import extract_structure
+from utils.ai_json import extract_json as _parse_json
 
 CV_MAX_TOKENS = 3200
 CL_MAX_TOKENS = 900
-
-
-def _parse_json(text):
-    if not text:
-        return None
-    cleaned = re.sub(r"```json|```", "", text).strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-    m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except json.JSONDecodeError:
-            pass
-    return None
 
 
 def _validate_and_repair(ai_data, parsed, user):
@@ -94,7 +77,7 @@ def generate_cover_letter_docx(user, job):
     profile = user.get("profile_summary", "")
     cv_text = user.get("cv_text", "")
     raw = ai_complete(prompts.cover_letter_prompt(profile, cv_text, job),
-                      label="cover_letter", max_tokens=CL_MAX_TOKENS)
+                      label="cover_letter", max_tokens=CL_MAX_TOKENS, lane="interactive")
     data = _parse_json(raw)
     if not data or not any(data.get(k) for k in ("para1", "para2", "para3")):
         print(f"  ⚠️ Cover letter parse failed — raw: {str(raw)[:200]}")
@@ -120,7 +103,7 @@ def generate_cv_docx(user, job):
         return None, None, ""
     parsed = extract_structure(cv_text) if cv_text else {}
     raw = ai_complete(prompts.tailored_cv_prompt(profile, cv_text, job, parsed_structure=parsed),
-                      label="tailored_cv", max_tokens=CV_MAX_TOKENS)
+                      label="tailored_cv", max_tokens=CV_MAX_TOKENS, lane="interactive")
     data = _validate_and_repair(_parse_json(raw) or {}, parsed, user)
     name_slug, co_slug = _safe_name(user, job)
     try:

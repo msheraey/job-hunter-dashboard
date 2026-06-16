@@ -12,6 +12,7 @@ from config import get_supabase
 from core.db import safe_select, safe_update, safe_delete, safe_insert
 from core.selftest import run_all as selftest_all
 from core.logger import RunLogger
+from core.jwt_auth import resolve_user_id
 from services.scraper import run_full_scrape, search_jobs
 from services.matcher import (search_and_score_for_user, refresh_matches_for_user,
                               set_job_status, update_match_notes)
@@ -24,14 +25,26 @@ from services import premium
 from utils.filters import validate_title
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": config.ALLOWED_ORIGINS}})
 
 @app.after_request
 def after_request(resp):
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
+    origin = request.headers.get("Origin")
+    if origin in config.ALLOWED_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization,X-Admin-Token"
     resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
     return resp
+
+def require_admin():
+    """Gate admin-trigger routes with a shared secret. Returns an error
+    response to short-circuit the route, or None if authorized."""
+    if not config.ADMIN_TOKEN:
+        return jsonify({"error": "ADMIN_TOKEN not configured on server"}), 503
+    if request.headers.get("X-Admin-Token") != config.ADMIN_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    return None
 
 @app.route("/", defaults={"path": ""}, methods=["OPTIONS"])
 @app.route("/<path:path>", methods=["OPTIONS"])
@@ -74,11 +87,30 @@ def dashboard():
 def api_logs():
     try:
         rows = get_supabase().table("scrape_logs").select(
-            "id,started_at,finished_at,status,total_scraped,total_saved,error").order(
+            "id,started_at,finished_at,status,total_scraped,total_saved,error,error_count").order(
             "started_at", desc=True).limit(30).execute().data or []
         return jsonify(rows)
     except Exception as e:
         return jsonify({"error": str(e)[:200]}), 500
+
+@app.route("/api/error-log")
+def api_error_log():
+    try:
+        limit = min(int(request.args.get("limit", 100)), 500)
+        offset = int(request.args.get("offset", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "limit and offset must be integers"}), 400
+    try:
+        rows = get_supabase().table("error_log").select("*").order(
+            "created_at", desc=True).limit(limit).offset(offset).execute().data or []
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500
+
+@app.route("/api/breaker-status")
+def api_breaker_status():
+    from core.retry import CircuitBreaker
+    return jsonify(CircuitBreaker.status_all())
 
 @app.route("/api/logs/<log_id>")
 def api_log_detail(log_id):
@@ -108,6 +140,46 @@ def api_analytics():
     except Exception as e:
         return jsonify({"error": str(e)[:200]}), 500
 
+@app.route("/api/jobs")
+def api_jobs():
+    try:
+        limit = min(int(request.args.get("limit", 50)), 500)
+        offset = int(request.args.get("offset", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "limit and offset must be integers"}), 400
+    try:
+        q = get_supabase().table("job_pool").select("*", count="exact")
+        kw = request.args.get("search_keyword")
+        if kw:
+            q = q.eq("search_keyword", kw)
+        r = q.order("posted_at", desc=True).limit(limit).offset(offset).execute()
+        return jsonify({"jobs": r.data or [], "total": r.count or 0})
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500
+
+@app.route("/api/users")
+def api_users():
+    err = require_admin()
+    if err:
+        return err
+    try:
+        limit = min(int(request.args.get("limit", 50)), 500)
+        offset = int(request.args.get("offset", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "limit and offset must be integers"}), 400
+    try:
+        rows = get_supabase().table("users").select(
+            "id,email,name,notify_pref,last_active,cv_text,profile_summary"
+        ).order("last_active", desc=True).limit(limit).offset(offset).execute().data or []
+        out = [{
+            "id": r["id"], "email": r.get("email"), "name": r.get("name"),
+            "notify_pref": r.get("notify_pref"), "last_active": r.get("last_active"),
+            "has_cv": bool(r.get("cv_text")), "has_profile": bool(r.get("profile_summary")),
+        } for r in rows]
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500
+
 @app.route("/api/system-health")
 def api_system_health():
     return jsonify(selftest_all())
@@ -117,9 +189,24 @@ def api_credit_status():
     from core.selftest import check_dataforseo
     return jsonify({"dataforseo": check_dataforseo()})
 
+@app.route("/api/dataforseo-pingback", methods=["GET", "POST"])
+def api_dataforseo_pingback():
+    """DataForSEO calls this when an async scrape task finishes. Fetch+save
+    happens in the background so DataForSEO gets an instant 200."""
+    task_id = request.args.get("id")
+    keyword = request.args.get("keyword")
+    if not task_id or not keyword:
+        return jsonify({"error": "id and keyword required"}), 400
+    from services.scraper import handle_pingback
+    threading.Thread(target=handle_pingback, args=(task_id, keyword), daemon=True).start()
+    return jsonify({"ok": True})
+
 # ── Scrape & score triggers ──────────────────────────────────
 @app.route("/api/run-scraper", methods=["POST"])
 def api_run_scraper():
+    err = require_admin()
+    if err:
+        return err
     def bg():
         logger = RunLogger("manual_scrape")
         try:
@@ -133,6 +220,9 @@ def api_run_scraper():
 
 @app.route("/api/score-and-email", methods=["POST"])
 def api_score_and_email():
+    err = require_admin()
+    if err:
+        return err
     def bg():
         from services.notifications import notify_daily
         logger = RunLogger("manual_score")
@@ -153,7 +243,10 @@ def api_score_and_email():
 @app.route("/api/refresh-matches", methods=["POST"])
 def api_refresh_matches():
     body = request.get_json(silent=True) or {}
-    user = _user(body.get("user_id"))
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
+    user = _user(user_id)
     if not user:
         return jsonify({"error": "user not found"}), 404
     safe_update("users", {"last_active": datetime.now(timezone.utc).isoformat()}, id=user["id"])
@@ -163,7 +256,10 @@ def api_refresh_matches():
 def api_job_status():
     """Update job status. Accepted: new | skipped | applied | interview | offer | rejected."""
     body = request.get_json(silent=True) or {}
-    ok = set_job_status(body.get("user_id"), body.get("job_id"), body.get("status"))
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
+    ok = set_job_status(user_id, body.get("job_id"), body.get("status"))
     return jsonify({"ok": ok}), (200 if ok else 400)
 
 
@@ -171,7 +267,10 @@ def api_job_status():
 def api_update_match_notes():
     """Save free-text notes against a job match (recruiter name, follow-up, etc.)."""
     body = request.get_json(silent=True) or {}
-    ok = update_match_notes(body.get("user_id"), body.get("job_id"),
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
+    ok = update_match_notes(user_id, body.get("job_id"),
                             (body.get("notes") or "")[:2000])
     return jsonify({"ok": ok}), (200 if ok else 400)
 
@@ -181,7 +280,9 @@ def api_set_interview_date():
     """Set or clear the interview date for a job match."""
     from core.db import safe_upsert
     body = request.get_json(silent=True) or {}
-    user_id = body.get("user_id")
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
     job_id = body.get("job_id")
     interview_date = body.get("interview_date")  # ISO string or null
     if not user_id or not job_id:
@@ -195,7 +296,10 @@ def api_set_interview_date():
 @app.route("/api/add-title", methods=["POST"])
 def api_add_title():
     body = request.get_json(silent=True) or {}
-    user_id, keyword = body.get("user_id"), (body.get("title") or "").strip()
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
+    keyword = (body.get("title") or "").strip()
     if not user_id or not validate_title(keyword):
         return jsonify({"error": "invalid title"}), 400
     title_row, is_new = get_or_create_title(keyword)
@@ -223,7 +327,9 @@ def api_add_title():
 def api_get_titles():
     """Return the user's tracked titles with metadata and job pool counts."""
     body = request.get_json(silent=True) or {}
-    user_id = body.get("user_id")
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
     if not user_id:
         return jsonify({"error": "user_id required"}), 400
     links = safe_select("user_titles", user_id=user_id)
@@ -255,13 +361,18 @@ def api_get_titles():
 @app.route("/api/can-edit-titles", methods=["POST"])
 def api_can_edit_titles():
     body = request.get_json(silent=True) or {}
-    links = safe_select("user_titles", user_id=body.get("user_id"))
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
+    links = safe_select("user_titles", user_id=user_id)
     return jsonify({"can_add": len(links) < 10, "count": len(links), "max": 10})
 
 @app.route("/api/delete-title", methods=["POST"])
 def api_delete_title():
     body = request.get_json(silent=True) or {}
-    user_id = body.get("user_id")
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
     # Accept user_title_id (PK of user_titles row) or legacy title_id field
     user_title_id = body.get("user_title_id") or body.get("title_id")
     if not user_id or not user_title_id:
@@ -273,7 +384,9 @@ def api_delete_title():
 @app.route("/api/delete-user", methods=["POST"])
 def api_delete_user():
     body = request.get_json(silent=True) or {}
-    uid = body.get("user_id")
+    uid, err = resolve_user_id(body, request)
+    if err:
+        return err
     if not uid:
         return jsonify({"error": "user_id required"}), 400
     safe_delete("user_job_matches", user_id=uid)
@@ -286,7 +399,9 @@ def api_delete_user():
 def api_get_account_links():
     """Return linked-platform status for the user's profile page."""
     body = request.get_json(silent=True) or {}
-    user_id = body.get("user_id")
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
     if not user_id:
         return jsonify({"error": "user_id required"}), 400
     from services.account_links import get_links
@@ -296,7 +411,9 @@ def api_get_account_links():
 def api_set_account_link():
     """Set or clear a platform link (linked / unlinked / expired)."""
     body = request.get_json(silent=True) or {}
-    user_id = body.get("user_id")
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
     site = body.get("site")
     status = body.get("status", "linked")
     if not user_id or not site:
@@ -313,7 +430,10 @@ def api_set_account_link():
 @app.route("/api/generate-cv", methods=["POST"])
 def api_generate_cv():
     body = request.get_json(silent=True) or {}
-    user = _user(body.get("user_id"))
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
+    user = _user(user_id)
     jobs = safe_select("job_pool", id=body.get("job_id"))
     if not user:
         return jsonify({"error": "User not found"}), 404
@@ -368,7 +488,10 @@ def api_download_cv():
     from services.cv_generator import generate_cv_docx
     import io
     body = request.get_json(silent=True) or {}
-    user = _user(body.get("user_id"))
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
+    user = _user(user_id)
     jobs = safe_select("job_pool", id=body.get("job_id"))
     if not user or not jobs:
         return jsonify({"error": "not found"}), 404
@@ -389,7 +512,10 @@ def api_download_cover_letter():
     from services.cv_generator import generate_cover_letter_docx
     import io
     body = request.get_json(silent=True) or {}
-    user = _user(body.get("user_id"))
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
+    user = _user(user_id)
     jobs = safe_select("job_pool", id=body.get("job_id"))
     if not user or not jobs:
         return jsonify({"error": "not found"}), 404
@@ -407,7 +533,9 @@ _MAX_CV_BYTES = 5 * 1024 * 1024  # 5 MB
 
 @app.route("/api/upload-cv", methods=["POST"])
 def api_upload_cv():
-    user_id = request.form.get("user_id")
+    user_id, err = resolve_user_id({"user_id": request.form.get("user_id")}, request)
+    if err:
+        return err
     f = request.files.get("file")
     if not user_id or not f:
         return jsonify({"error": "user_id and file required"}), 400
@@ -436,41 +564,53 @@ def api_upload_cv():
 # ── Premium intelligence ─────────────────────────────────────
 def _premium_ctx():
     body = request.get_json(silent=True) or {}
-    user = _user(body.get("user_id"))
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return None, None, err
     jobs = safe_select("job_pool", id=body.get("job_id"))
-    return user, (jobs[0] if jobs else None)
+    return _user(user_id), (jobs[0] if jobs else None), None
 
 @app.route("/api/premium/ats-score", methods=["POST"])
 def api_ats():
-    user, job = _premium_ctx()
+    user, job, err = _premium_ctx()
+    if err:
+        return err
     if not user or not job:
         return jsonify({"error": "user or job not found"}), 404
     return jsonify(premium.ats_score(user, job))
 
 @app.route("/api/premium/salary", methods=["POST"])
 def api_salary():
-    _, job = _premium_ctx()
+    _, job, err = _premium_ctx()
+    if err:
+        return err
     if not job:
         return jsonify({"error": "job not found"}), 404
     return jsonify(premium.salary_estimate(job))
 
 @app.route("/api/premium/red-flags", methods=["POST"])
 def api_red_flags():
-    _, job = _premium_ctx()
+    _, job, err = _premium_ctx()
+    if err:
+        return err
     if not job:
         return jsonify({"error": "job not found"}), 404
     return jsonify(premium.red_flags(job))
 
 @app.route("/api/premium/interview-prep", methods=["POST"])
 def api_interview():
-    user, job = _premium_ctx()
+    user, job, err = _premium_ctx()
+    if err:
+        return err
     if not user or not job:
         return jsonify({"error": "user or job not found"}), 404
     return jsonify(premium.interview_prep(user, job))
 
 @app.route("/api/premium/company-info", methods=["POST"])
 def api_company():
-    _, job = _premium_ctx()
+    _, job, err = _premium_ctx()
+    if err:
+        return err
     if not job:
         return jsonify({"error": "job not found"}), 404
     return jsonify(premium.company_info(job))
@@ -478,7 +618,9 @@ def api_company():
 @app.route("/api/job-summary", methods=["POST"])
 def api_job_summary():
     """3-bullet AI summary of a job posting. Cached in job_pool."""
-    _, job = _premium_ctx()
+    _, job, err = _premium_ctx()
+    if err:
+        return err
     if not job:
         return jsonify({"error": "job not found"}), 404
     return jsonify(premium.job_summary(job))
@@ -487,7 +629,10 @@ def api_job_summary():
 def api_skills_gap():
     """Cross-job skills gap analysis for the user."""
     body = request.get_json(silent=True) or {}
-    user = _user(body.get("user_id"))
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
+    user = _user(user_id)
     if not user:
         return jsonify({"error": "user not found"}), 404
     # Collect user's tracked title keywords
@@ -501,7 +646,10 @@ def api_skills_gap():
 def api_application_board():
     """Return all user matches grouped by status for the Kanban board."""
     body = request.get_json(silent=True) or {}
-    user = _user(body.get("user_id"))
+    user_id, err = resolve_user_id(body, request)
+    if err:
+        return err
+    user = _user(user_id)
     if not user:
         return jsonify({"error": "user not found"}), 404
     try:

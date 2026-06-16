@@ -1,6 +1,6 @@
 """
 services/cv_parser.py — PDF/DOCX CV upload parsing.
-Extracts full text + best-guess candidate name. Pure-Python (pypdf, python-docx).
+Extracts full text + best-guess candidate name. Pure-Python (pdfplumber, python-docx).
 """
 import io
 import re
@@ -25,9 +25,9 @@ def parse_cv(file_bytes, filename):
     return {"text": text[:15000], "name": _guess_name(text), "error": None}
 
 def _parse_pdf(b):
-    from pypdf import PdfReader
-    reader = PdfReader(io.BytesIO(b))
-    return "\n".join((p.extract_text() or "") for p in reader.pages)
+    import pdfplumber
+    with pdfplumber.open(io.BytesIO(b)) as pdf:
+        return "\n".join((page.extract_text() or "") for page in pdf.pages)
 
 def _parse_docx(b):
     import docx

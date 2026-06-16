@@ -16,7 +16,7 @@ def expand_title(title):
     """Return up to 3 validated synonym titles (may be empty on AI failure)."""
     if not config.SEMANTIC_EXPAND:
         return []
-    text = ai_complete(prompts.synonym_prompt(title), label="synonyms")
+    text = ai_complete(prompts.synonym_prompt(title), label="synonyms", lane="interactive")
     if not text:
         return []
     cleaned = re.sub(r"```json|```", "", text).strip()
