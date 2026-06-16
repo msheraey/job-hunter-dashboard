@@ -7,6 +7,7 @@ Daily now has two modes:
 """
 import config
 from core.db import safe_select
+from core.error_log import log_error
 
 
 def _load_top_unactioned(user_id, limit=10):
@@ -55,9 +56,11 @@ def _send_email(user_email, user_name, jobs, is_catchup=False):
         return send_job_matches_email(user_email, user_name, jobs, is_catchup=is_catchup)
     except ImportError:
         print("  ⚠️ email_service not available")
+        log_error("notifications._send_email", "email_service not available")
         return False
     except Exception as e:
         print(f"  ⚠️ email send failed: {e}")
+        log_error("notifications._send_email", str(e))
         return False
 
 

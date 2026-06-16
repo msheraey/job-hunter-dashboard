@@ -60,3 +60,16 @@ CREATE TABLE IF NOT EXISTS serpapi_usage (
   call_count int NOT NULL DEFAULT 0,
   updated_at timestamptz DEFAULT now()
 );
+
+-- Centralized error capture (live-request + breaker failures that bare print()'d before)
+CREATE TABLE IF NOT EXISTS error_log (
+  id bigserial PRIMARY KEY,
+  created_at timestamptz DEFAULT now(),
+  source text NOT NULL,     -- e.g. 'matcher._user_titles', 'circuit_breaker'
+  message text NOT NULL,
+  context text               -- short extra detail; never PII/secrets
+);
+CREATE INDEX IF NOT EXISTS idx_error_log_created_at ON error_log (created_at DESC);
+
+-- Persist RunLogger's existing in-memory error counter (was tracked, never saved)
+ALTER TABLE scrape_logs ADD COLUMN IF NOT EXISTS error_count int DEFAULT 0;

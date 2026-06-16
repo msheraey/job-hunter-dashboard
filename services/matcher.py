@@ -9,6 +9,7 @@ from collections import Counter
 from datetime import datetime, timezone, timedelta
 from config import get_supabase
 from core.db import safe_select, safe_upsert, safe_update
+from core.error_log import log_error
 from services.scraper import search_jobs
 from services.scorer import score_jobs_for_user
 from services.classifier import quality_score
@@ -41,6 +42,7 @@ def _user_titles(user_id):
             "keyword,normalized,last_scraped").in_("id", ids).execute().data or []
     except Exception as e:
         print(f"  ⚠️ titles fetch: {e}")
+        log_error("matcher._user_titles", str(e))
         return []
 
 def _already_scored(user_id):
@@ -161,6 +163,7 @@ def refresh_matches_for_user(user, logger=None):
                     search_jobs(kw, user_gender=gender)
                 except Exception as e:
                     print(f"  ❌ bg scrape {kw}: {e}")
+                    log_error("matcher.refresh_matches_for_user.bg_scrape", str(e), context=kw)
         threading.Thread(target=bg, daemon=True).start()
         log(f"  🌐 Background scraping {len(pending)} titles")
 
@@ -172,6 +175,7 @@ def refresh_matches_for_user(user, logger=None):
             "status", "new").execute().data or []
     except Exception as e:
         print(f"  ⚠️ matches read: {e}")
+        log_error("matcher.refresh_matches_for_user.matches_read", str(e))
         rows = []
     if not rows:
         return {"matches": [], "pending_titles": pending}
@@ -181,6 +185,7 @@ def refresh_matches_for_user(user, logger=None):
         jobs = get_supabase().table("job_pool").select("*").in_("id", ids).execute().data or []
     except Exception as e:
         print(f"  ⚠️ jobs read: {e}")
+        log_error("matcher.refresh_matches_for_user.jobs_read", str(e))
         jobs = []
     for j in jobs:
         r = rmap.get(j["id"], {})

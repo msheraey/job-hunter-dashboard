@@ -28,6 +28,8 @@ class CircuitBreaker:
     State is shared across workers via Redis when config.REDIS_URL is set;
     otherwise it falls back to this process's in-memory state.
     """
+    _registry = []
+
     def __init__(self, name, threshold=4, cooldown=120):
         self.name = name
         self.threshold = threshold
@@ -44,6 +46,11 @@ class CircuitBreaker:
                 self._redis = client
             except Exception as e:
                 print(f"  ⚠️ Redis unavailable for breaker '{name}', using in-memory state: {str(e)[:80]}")
+        CircuitBreaker._registry.append(self)
+
+    @classmethod
+    def status_all(cls):
+        return [{"name": b.name, "open": b.is_open(), "cooldown": b.cooldown} for b in cls._registry]
 
     def _key(self, suffix):
         return f"breaker:{self.name}:{suffix}"
@@ -80,6 +87,8 @@ class CircuitBreaker:
                     self._redis.set(self._key("open_until"), time.time() + self.cooldown,
                                     ex=self.cooldown + 10)
                     print(f"  ⛔ Circuit OPEN for {self.name} — skipping for {self.cooldown}s")
+                    from core.error_log import log_error
+                    log_error("circuit_breaker", f"{self.name} opened for {self.cooldown}s")
                 return
             except Exception:
                 pass
@@ -88,6 +97,8 @@ class CircuitBreaker:
             if self.failures >= self.threshold:
                 self.open_until = time.time() + self.cooldown
                 print(f"  ⛔ Circuit OPEN for {self.name} — skipping for {self.cooldown}s")
+                from core.error_log import log_error
+                log_error("circuit_breaker", f"{self.name} opened for {self.cooldown}s")
 
 def backoff_sleep(attempt, base=1.5, cap=20.0):
     """Exponential backoff with full jitter: sleep U(0, min(cap, base*2^attempt))."""

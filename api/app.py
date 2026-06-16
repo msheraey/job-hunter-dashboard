@@ -87,11 +87,30 @@ def dashboard():
 def api_logs():
     try:
         rows = get_supabase().table("scrape_logs").select(
-            "id,started_at,finished_at,status,total_scraped,total_saved,error").order(
+            "id,started_at,finished_at,status,total_scraped,total_saved,error,error_count").order(
             "started_at", desc=True).limit(30).execute().data or []
         return jsonify(rows)
     except Exception as e:
         return jsonify({"error": str(e)[:200]}), 500
+
+@app.route("/api/error-log")
+def api_error_log():
+    try:
+        limit = min(int(request.args.get("limit", 100)), 500)
+        offset = int(request.args.get("offset", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "limit and offset must be integers"}), 400
+    try:
+        rows = get_supabase().table("error_log").select("*").order(
+            "created_at", desc=True).limit(limit).offset(offset).execute().data or []
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500
+
+@app.route("/api/breaker-status")
+def api_breaker_status():
+    from core.retry import CircuitBreaker
+    return jsonify(CircuitBreaker.status_all())
 
 @app.route("/api/logs/<log_id>")
 def api_log_detail(log_id):
@@ -118,6 +137,46 @@ def api_analytics():
             "applied_total": applied,
             "skipped_total": skipped,
         })
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500
+
+@app.route("/api/jobs")
+def api_jobs():
+    try:
+        limit = min(int(request.args.get("limit", 50)), 500)
+        offset = int(request.args.get("offset", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "limit and offset must be integers"}), 400
+    try:
+        q = get_supabase().table("job_pool").select("*", count="exact")
+        kw = request.args.get("search_keyword")
+        if kw:
+            q = q.eq("search_keyword", kw)
+        r = q.order("posted_at", desc=True).limit(limit).offset(offset).execute()
+        return jsonify({"jobs": r.data or [], "total": r.count or 0})
+    except Exception as e:
+        return jsonify({"error": str(e)[:200]}), 500
+
+@app.route("/api/users")
+def api_users():
+    err = require_admin()
+    if err:
+        return err
+    try:
+        limit = min(int(request.args.get("limit", 50)), 500)
+        offset = int(request.args.get("offset", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "limit and offset must be integers"}), 400
+    try:
+        rows = get_supabase().table("users").select(
+            "id,email,name,notify_pref,last_active,cv_text,profile_summary"
+        ).order("last_active", desc=True).limit(limit).offset(offset).execute().data or []
+        out = [{
+            "id": r["id"], "email": r.get("email"), "name": r.get("name"),
+            "notify_pref": r.get("notify_pref"), "last_active": r.get("last_active"),
+            "has_cv": bool(r.get("cv_text")), "has_profile": bool(r.get("profile_summary")),
+        } for r in rows]
+        return jsonify(out)
     except Exception as e:
         return jsonify({"error": str(e)[:200]}), 500
 
