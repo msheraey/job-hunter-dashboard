@@ -11,7 +11,8 @@ import requests
 import config
 import prompts
 from utils.filters import infer_industry
-from core.retry import CircuitBreaker
+from utils.ai_json import extract_json
+from core.retry import CircuitBreaker, RateLimitError
 from core.db import safe_update
 
 groq_breaker   = CircuitBreaker("groq",   threshold=4, cooldown=120)
@@ -60,39 +61,35 @@ def parse_ai_json(text, title="", description=""):
     if not text:
         out["industry"] = infer_industry(title, description)
         return out
-    cleaned = re.sub(r"```json|```", "", text).strip()
-    m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if m:
-        try:
-            data = json.loads(m.group(0))
-            v = data.get("score")
-            if v is not None:
-                try:
-                    out["score"] = max(0, min(100, int(v)))
-                except (ValueError, TypeError):
-                    pass
-            out["industry"] = map_industry(data.get("industry"))
-            # New bullet format: match_bullets + gap_bullets
-            mb = data.get("match_bullets") or []
-            gb = data.get("gap_bullets") or []
-            if isinstance(mb, list) and mb:
-                match_b = [str(b).strip() for b in mb[:5] if b]
-                if not isinstance(gb, list):
-                    print(f"  ⚠️ gap_bullets wrong type ({type(gb).__name__}) — discarding")
-                    gb = []
-                gap_b = [str(b).strip() for b in gb[:4] if b]
-                out["reason"] = json.dumps({"m": match_b, "g": gap_b})
-            else:
-                # Legacy plain-string reason
-                r = data.get("reason")
-                out["reason"] = str(r).strip()[:300] if r else None
-            out["seniority"] = data.get("seniority")
-            out["remote"] = data.get("remote")
-            out["visa_likelihood"] = data.get("visa_likelihood")
-        except json.JSONDecodeError:
-            pass
+    data = extract_json(text)
+    if isinstance(data, dict):
+        v = data.get("score")
+        if v is not None:
+            try:
+                out["score"] = max(0, min(100, int(v)))
+            except (ValueError, TypeError):
+                pass
+        out["industry"] = map_industry(data.get("industry"))
+        # New bullet format: match_bullets + gap_bullets
+        mb = data.get("match_bullets") or []
+        gb = data.get("gap_bullets") or []
+        if isinstance(mb, list) and mb:
+            match_b = [str(b).strip() for b in mb[:5] if b]
+            if not isinstance(gb, list):
+                print(f"  ⚠️ gap_bullets wrong type ({type(gb).__name__}) — discarding")
+                gb = []
+            gap_b = [str(b).strip() for b in gb[:4] if b]
+            out["reason"] = json.dumps({"m": match_b, "g": gap_b})
+        else:
+            # Legacy plain-string reason
+            r = data.get("reason")
+            out["reason"] = str(r).strip()[:300] if r else None
+        out["seniority"] = data.get("seniority")
+        out["remote"] = data.get("remote")
+        out["visa_likelihood"] = data.get("visa_likelihood")
     if out["score"] is None:
         # Prefer a number explicitly labelled as a score over any arbitrary number
+        cleaned = re.sub(r"```json|```", "", text).strip()
         m2 = re.search(r'"score"\s*:\s*(\d+)', cleaned)
         if not m2:
             m2 = re.search(r'\bscore\b["\s:]*(\d+)', cleaned, re.IGNORECASE)
@@ -115,7 +112,7 @@ def _call_groq(prompt, max_tokens=200):
         timeout=30,
     )
     if r.status_code == 429:
-        raise RuntimeError("groq 429")
+        raise RateLimitError("groq 429")
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]
 
@@ -128,7 +125,7 @@ def _call_gemini(prompt, max_tokens=200):
         timeout=30,
     )
     if r.status_code == 429:
-        raise RuntimeError("gemini 429")
+        raise RateLimitError("gemini 429")
     r.raise_for_status()
     return r.json()["candidates"][0]["content"]["parts"][0]["text"]
 
@@ -143,7 +140,7 @@ def _call_haiku(prompt, max_tokens=200):
         timeout=30,
     )
     if r.status_code == 429:
-        raise RuntimeError("haiku 429")
+        raise RateLimitError("haiku 429")
     r.raise_for_status()
     data = r.json()
     if "content" not in data:
@@ -167,6 +164,9 @@ def ai_complete(prompt, label="ai", max_tokens=200):
             text = fn(prompt, max_tokens)
             breaker.record_success()
             return text
+        except RateLimitError as e:
+            # Rate-limited, not down — don't penalize the breaker, just move on.
+            print(f"    ⏳ {name} rate-limited for {label}: {str(e)[:80]}")
         except Exception as e:
             breaker.record_failure()
             print(f"    ⚠️ {name} failed for {label}: {str(e)[:80]}")

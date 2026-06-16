@@ -6,6 +6,7 @@ FALLBACK: Async task_post/task_get (if Live errors), capped at TITLE_TIMEOUT_S.
 import time
 import requests
 import config
+from urllib.parse import quote
 from config import get_supabase
 from core.retry import CircuitBreaker
 from core.db import safe_select, safe_update, safe_insert
@@ -43,12 +44,20 @@ def _live_search(keyword, log):
     return items
 
 def _async_search(keyword, log):
-    """Fallback: async flow with hard deadline. Slow but works when Live is down."""
+    """Fallback: async flow with hard deadline. Slow but works when Live is down.
+    Also registers a pingback so results that complete after our deadline
+    (PUBLIC_BASE_URL permitting) still get saved instead of being lost."""
     deadline = time.time() + config.TITLE_TIMEOUT_S
+    payload = _payload(keyword)
+    if config.PUBLIC_BASE_URL:
+        payload[0]["pingback_url"] = (
+            f"{config.PUBLIC_BASE_URL}/api/dataforseo-pingback"
+            f"?keyword={quote(normalize_title(keyword))}"
+        )
     r = requests.post(
         "https://api.dataforseo.com/v3/serp/google/jobs/task_post",
         auth=(config.DATAFORSEO_LOGIN, config.DATAFORSEO_PASSWORD),
-        json=_payload(keyword), timeout=15,
+        json=payload, timeout=15,
     )
     if r.status_code != 200:
         log(f"  ❌ Async post HTTP {r.status_code}")
@@ -78,6 +87,30 @@ def _async_search(keyword, log):
             continue
     log("  ❌ Async: no results after all attempts")
     return []
+
+def handle_pingback(task_id, keyword, log=print):
+    """DataForSEO notified us a task finished — fetch + save its results.
+    Safe to run even if polling already saved the same task (save_jobs
+    dedupes by link), so a late or duplicate pingback is harmless."""
+    try:
+        g = requests.get(
+            f"https://api.dataforseo.com/v3/serp/google/jobs/task_get/advanced/{task_id}",
+            auth=(config.DATAFORSEO_LOGIN, config.DATAFORSEO_PASSWORD), timeout=15,
+        )
+        if g.status_code != 200:
+            log(f"  ⚠️ pingback task_get HTTP {g.status_code} for {task_id}")
+            return 0
+        result = ((g.json().get("tasks") or [{}])[0].get("result") or [None])[0]
+        items = (result or {}).get("items") or []
+        if not items:
+            log(f"  ℹ️ pingback: no items for {task_id} ({keyword})")
+            return 0
+        saved = save_jobs(keyword, items, log)
+        log(f"  📨 pingback saved {saved} jobs for '{keyword}'")
+        return saved
+    except requests.RequestException as e:
+        log(f"  ⚠️ pingback fetch failed: {str(e)[:100]}")
+        return 0
 
 def dataforseo_search(keyword, log=print):
     """Live primary → async fallback, with circuit breaker on Live."""
