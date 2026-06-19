@@ -129,7 +129,7 @@ def _serpapi_search(keyword, log):
 def _serpapi_to_dataforseo_shape(item):
     """Normalize a SerpApi job result into DataForSEO's item shape so save_jobs needs no changes."""
     posted = (item.get("detected_extensions") or {}).get("posted_at")
-    link = (item.get("related_links") or [{}])[0].get("link") or item.get("share_link") or ""
+    link = next((o.get("link","") for o in (item.get("apply_options") or []) if o.get("link","") and "google.com" not in o.get("link","")), "") or next((r.get("link","") for r in (item.get("related_links") or []) if r.get("link","") and "google.com" not in r.get("link","")), "") or item.get("share_link","") or ""
     return {
         "title": item.get("title", ""),
         "employer_name": item.get("company_name", "Unknown"),
