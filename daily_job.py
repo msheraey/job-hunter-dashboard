@@ -42,7 +42,16 @@ def run_daily():
         run_full_scrape(logger)
 
         logger.add("\n👥 STEP 3: Loading users...")
-        users = safe_select("users")
+        from config import get_supabase as _sb
+        def _all_users():
+            off, batch = 0, 50
+            while True:
+                page = _sb().table("users").select("*").range(off, off + batch - 1).execute().data or []
+                yield from page
+                if len(page) < batch:
+                    break
+                off += batch
+        users = list(_all_users())
         logger.add(f"✅ {len(users)} active users")
 
         logger.add("\n🤖 STEP 4: Scoring & notifying...")

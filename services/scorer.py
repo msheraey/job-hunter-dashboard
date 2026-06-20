@@ -203,7 +203,7 @@ def score_jobs_for_user(jobs, user):
     if user.get("profile_summary"):
         profile_parts.append(f"Summary: {user['profile_summary']}")
     if user.get("cv_text"):
-        profile_parts.append(f"CV: {user['cv_text'][:1200]}")
+        profile_parts.append(f"CV: {user['cv_text'][:6000]}")
     if not profile_parts:
         return jobs
     user_profile = "\n".join(profile_parts)

@@ -2,7 +2,11 @@
 api/app.py — Flask application. ALL legacy routes preserved (Lovable frontend
 contract unchanged) + new routes: job-status, upload-cv, premium/*, self-test.
 """
+import hmac
+import time
 import threading
+import concurrent.futures
+from collections import Counter
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime, timezone
@@ -25,7 +29,16 @@ from services import premium
 from utils.filters import validate_title
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": config.ALLOWED_ORIGINS}})
+# CORS headers are set in the @after_request hook below — no need for flask-cors here.
+# (Keeping the import for potential future use but not initialising it to avoid duplicate headers.)
+
+# Bounded thread pool for all background tasks — prevents unbounded thread spawning under load.
+_bg_pool = concurrent.futures.ThreadPoolExecutor(max_workers=20, thread_name_prefix="jh-bg")
+
+# Per-user refresh rate limiter (in-memory): prevents rapid AI-budget burn from repeated calls.
+_refresh_ts: dict = {}
+_refresh_lock = threading.Lock()
+_REFRESH_COOLDOWN_S = 30
 
 @app.after_request
 def after_request(resp):
@@ -42,7 +55,8 @@ def require_admin():
     response to short-circuit the route, or None if authorized."""
     if not config.ADMIN_TOKEN:
         return jsonify({"error": "ADMIN_TOKEN not configured on server"}), 503
-    if request.headers.get("X-Admin-Token") != config.ADMIN_TOKEN:
+    provided = request.headers.get("X-Admin-Token", "")
+    if not hmac.compare_digest(provided, config.ADMIN_TOKEN):
         return jsonify({"error": "unauthorized"}), 401
     return None
 
@@ -123,19 +137,26 @@ def api_log_detail(log_id):
 def api_analytics():
     try:
         sb = get_supabase()
-        users = sb.table("users").select("id", count="exact").execute().count or 0
-        jobs = sb.table("job_pool").select("id", count="exact").execute().count or 0
-        matches = sb.table("user_job_matches").select("id", count="exact").gte("score", 60).execute().count or 0
-        titles = sb.table("title_pool").select("id", count="exact").execute().count or 0
-        applied = sb.table("user_job_matches").select("id", count="exact").eq("status", "applied").execute().count or 0
-        skipped = sb.table("user_job_matches").select("id", count="exact").eq("status", "skipped").execute().count or 0
+        def _c(table, **filters):
+            q = sb.table(table).select("id", count="exact")
+            for k, v in filters.items():
+                q = q.eq(k, v) if not k.startswith("gte_") else q.gte(k[4:], v)
+            return q.execute().count or 0
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+            f_users   = ex.submit(lambda: sb.table("users").select("id", count="exact").execute().count or 0)
+            f_jobs    = ex.submit(lambda: sb.table("job_pool").select("id", count="exact").execute().count or 0)
+            f_matches = ex.submit(lambda: sb.table("user_job_matches").select("id", count="exact").gte("score", 60).execute().count or 0)
+            f_titles  = ex.submit(lambda: sb.table("title_pool").select("id", count="exact").execute().count or 0)
+            f_applied = ex.submit(lambda: sb.table("user_job_matches").select("id", count="exact").eq("status", "applied").execute().count or 0)
+            f_skipped = ex.submit(lambda: sb.table("user_job_matches").select("id", count="exact").eq("status", "skipped").execute().count or 0)
         return jsonify({
-            "users": users,
-            "jobs_in_pool": jobs,
-            "matches_60plus": matches,
-            "titles": titles,
-            "applied_total": applied,
-            "skipped_total": skipped,
+            "users": f_users.result(),
+            "jobs_in_pool": f_jobs.result(),
+            "matches_60plus": f_matches.result(),
+            "titles": f_titles.result(),
+            "applied_total": f_applied.result(),
+            "skipped_total": f_skipped.result(),
         })
     except Exception as e:
         return jsonify({"error": str(e)[:200]}), 500
@@ -198,7 +219,7 @@ def api_dataforseo_pingback():
     if not task_id or not keyword:
         return jsonify({"error": "id and keyword required"}), 400
     from services.scraper import handle_pingback
-    threading.Thread(target=handle_pingback, args=(task_id, keyword), daemon=True).start()
+    _bg_pool.submit(handle_pingback, task_id, keyword)
     return jsonify({"ok": True})
 
 # ── Scrape & score triggers ──────────────────────────────────
@@ -215,8 +236,18 @@ def api_run_scraper():
         except Exception as e:
             logger.add(f"❌ Fatal: {e}")
             logger.finish(success=False, error=e)
-    threading.Thread(target=bg, daemon=True).start()
+    _bg_pool.submit(bg)
     return jsonify({"started": True})
+
+def _paginated_users():
+    """Fetch all users in 50-row pages to avoid a full-table load into memory."""
+    off, batch = 0, 50
+    while True:
+        page = get_supabase().table("users").select("*").range(off, off + batch - 1).execute().data or []
+        yield from page
+        if len(page) < batch:
+            break
+        off += batch
 
 @app.route("/api/score-and-email", methods=["POST"])
 def api_score_and_email():
@@ -227,8 +258,7 @@ def api_score_and_email():
         from services.notifications import notify_daily
         logger = RunLogger("manual_score")
         try:
-            users = safe_select("users")
-            for u in users:
+            for u in _paginated_users():
                 logger.add(f"Processing {u.get('email')}")
                 matches = search_and_score_for_user(u, logger=logger)
                 notify_daily(u, matches, log=logger.add)
@@ -236,7 +266,7 @@ def api_score_and_email():
         except Exception as e:
             logger.add(f"❌ Fatal: {e}")
             logger.finish(success=False, error=e)
-    threading.Thread(target=bg, daemon=True).start()
+    _bg_pool.submit(bg)
     return jsonify({"started": True})
 
 # ── User-facing: matches, titles, status ─────────────────────
@@ -246,6 +276,13 @@ def api_refresh_matches():
     user_id, err = resolve_user_id(body, request)
     if err:
         return err
+    with _refresh_lock:
+        last = _refresh_ts.get(user_id, 0)
+        now = time.time()
+        if now - last < _REFRESH_COOLDOWN_S:
+            wait = int(_REFRESH_COOLDOWN_S - (now - last))
+            return jsonify({"error": f"Please wait {wait}s before refreshing again"}), 429
+        _refresh_ts[user_id] = now
     user = _user(user_id)
     if not user:
         return jsonify({"error": "user not found"}), 404
@@ -287,6 +324,11 @@ def api_set_interview_date():
     interview_date = body.get("interview_date")  # ISO string or null
     if not user_id or not job_id:
         return jsonify({"error": "user_id and job_id required"}), 400
+    if interview_date is not None and interview_date != "":
+        try:
+            datetime.fromisoformat(str(interview_date).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return jsonify({"error": "interview_date must be a valid ISO datetime string"}), 400
     ok = safe_upsert("user_job_matches",
                      {"user_id": user_id, "job_id": job_id,
                       "interview_date": interview_date},
@@ -306,6 +348,7 @@ def api_add_title():
     if not title_row:
         return jsonify({"error": "could not create title"}), 500
     link_user_title(user_id, title_row)
+    from core.error_log import log_error as _log_error
     def bg():
         try:
             user = _user(user_id) or {}
@@ -319,8 +362,8 @@ def api_add_title():
                     link_user_title(user_id, syn_row)
                     search_jobs(syn, user_gender=user.get("gender"))
         except Exception as e:
-            print(f"  ❌ add-title bg: {e}")
-    threading.Thread(target=bg, daemon=True).start()
+            _log_error("app.add_title", str(e))
+    _bg_pool.submit(bg)
     return jsonify({"added": [keyword], "title_id": title_row["id"], "expanding": config.SEMANTIC_EXPAND})
 
 @app.route("/api/get-titles", methods=["POST"])
@@ -342,20 +385,21 @@ def api_get_titles():
             "id,keyword,normalized,last_scraped").in_("id", title_ids).execute().data or []
     except Exception as e:
         return jsonify({"error": str(e)[:200]}), 500
-    result = []
-    for t in titles:
-        try:
-            count = get_supabase().table("job_pool").select(
-                "id", count="exact").eq("search_keyword", t["normalized"]).execute().count or 0
-        except Exception:
-            count = 0
-        result.append({
-            "user_title_id": link_map.get(t["id"]),
-            "title_id": t["id"],
-            "keyword": t["keyword"],
-            "last_scraped": t["last_scraped"],
-            "job_count": count,
-        })
+    # Fetch job counts for all keywords in one query instead of N round-trips
+    normalized_kws = [t["normalized"] for t in titles if t.get("normalized")]
+    try:
+        count_rows = get_supabase().table("job_pool").select(
+            "search_keyword").in_("search_keyword", normalized_kws).execute().data or []
+        kw_counts = Counter(r["search_keyword"] for r in count_rows)
+    except Exception:
+        kw_counts = {}
+    result = [{
+        "user_title_id": link_map.get(t["id"]),
+        "title_id": t["id"],
+        "keyword": t["keyword"],
+        "last_scraped": t["last_scraped"],
+        "job_count": kw_counts.get(t.get("normalized", ""), 0),
+    } for t in titles]
     return jsonify({"titles": result})
 
 @app.route("/api/can-edit-titles", methods=["POST"])
@@ -391,6 +435,7 @@ def api_delete_user():
         return jsonify({"error": "user_id required"}), 400
     safe_delete("user_job_matches", user_id=uid)
     safe_delete("user_titles", user_id=uid)
+    safe_delete("user_linked_accounts", user_id=uid)
     ok = safe_delete("users", id=uid)
     return jsonify({"ok": ok})
 
@@ -444,12 +489,13 @@ def api_generate_cv():
 
     try:
         from services.cv_generator import generate_cover_letter_docx, generate_cv_docx
+        from core.error_log import log_error as _log_error
         import base64
 
         cl_bytes, cl_file, cl_plain = generate_cover_letter_docx(user, jobs[0])
         cv_bytes, cv_file, cv_plain = generate_cv_docx(user, jobs[0])
     except Exception as e:
-        print(f"  ❌ generate-cv exception: {e}")
+        _log_error("app.generate_cv", str(e))
         return jsonify({"error": f"Generation failed: {str(e)[:120]}"}), 500
 
     if not cl_bytes and not cv_bytes:
@@ -476,9 +522,8 @@ def api_generate_cv():
                 jobs[0].get("title"), jobs[0].get("company"),
                 cv_plain, cl_plain)
         except Exception as e:
-            print(f"  ⚠️ CV email: {e}")
-    import threading
-    threading.Thread(target=send_bg, daemon=True).start()
+            _log_error("app.generate_cv_email", str(e))
+    _bg_pool.submit(send_bg)
     return jsonify(result)
 
 @app.route("/api/download-cv", methods=["POST"])
@@ -545,8 +590,12 @@ def api_upload_cv():
     result = parse_cv(data, f.filename)
     if result["error"]:
         return jsonify({"error": result["error"]}), 422
+    if len(result.get("text") or "") < 100:
+        return jsonify({"error": "CV parsed but appears empty or unreadable — please check the file format"}), 422
+    from core.error_log import log_error as _log_error
     safe_update("users", {"cv_text": result["text"]}, id=user_id)
-    # Clear unactioned matches so they get re-scored against the new CV
+    # Clear unactioned matches so they get re-scored against the new CV.
+    # Guard: only runs after confirming the CV parsed successfully (length check above).
     def _clear_unactioned():
         try:
             rows = get_supabase().table("user_job_matches").select(
@@ -554,10 +603,9 @@ def api_upload_cv():
             if rows:
                 ids = [r["id"] for r in rows]
                 get_supabase().table("user_job_matches").delete().in_("id", ids).execute()
-                print(f"  ♻️  CV updated — cleared {len(ids)} unactioned matches for re-score")
         except Exception as e:
-            print(f"  ⚠️ clear-on-cv-update: {e}")
-    threading.Thread(target=_clear_unactioned, daemon=True).start()
+            _log_error("app.upload_cv_clear", str(e))
+    _bg_pool.submit(_clear_unactioned)
     return jsonify({"ok": True, "name_detected": result["name"],
                     "chars": len(result["text"]), "rescoring": True})
 
@@ -690,7 +738,7 @@ def api_application_board():
 @app.route("/api/old-jobs")
 def api_old_jobs():
     try:
-        limit = int(request.args.get("limit", 100))
+        limit = min(int(request.args.get("limit", 100)), 500)
         offset = int(request.args.get("offset", 0))
     except (ValueError, TypeError):
         return jsonify({"error": "limit and offset must be integers"}), 400
