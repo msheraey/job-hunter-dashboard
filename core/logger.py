@@ -35,6 +35,11 @@ class RunLogger:
         if len(self.lines) % 10 == 0:
             self._flush()
 
+    def error(self, msg, print_it=True):
+        """Explicitly log an error — increments error_count without relying on emoji detection."""
+        self.errors += 1
+        self.add(msg, print_it)
+
     def _flush(self):
         if not self.log_id:
             return

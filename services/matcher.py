@@ -45,8 +45,15 @@ def _user_titles(user_id):
         log_error("matcher._user_titles", str(e))
         return []
 
+_SCORED_LIMIT = 10000  # cap in-memory set; upsert handles any beyond this gracefully
+
 def _already_scored(user_id):
-    rows = safe_select("user_job_matches", columns="job_id", user_id=user_id)
+    try:
+        rows = get_supabase().table("user_job_matches").select(
+            "job_id").eq("user_id", user_id).limit(_SCORED_LIMIT).execute().data or []
+    except Exception as e:
+        log_error("matcher._already_scored", str(e))
+        rows = []
     return {r["job_id"] for r in rows}
 
 def _dedupe(jobs, scored_ids):
@@ -110,27 +117,32 @@ def search_and_score_for_user(user, logger=None):
     log(f"  ✅ {len(matched)} at {config.MATCH_THRESHOLD}%+")
     return matched
 
+_JOB_POOL_COLS = (
+    "id,title,company,location,posted_at,link,platform,salary,"
+    "salary_min_aed,salary_max_aed,industry,seniority,remote_status,"
+    "visa_likelihood,quality_score,description,fingerprint"
+)
+
+
 def refresh_matches_for_user(user, logger=None):
-    """Dashboard path: instant return of stored matches; score new pool jobs;
-    background-scrape any titles with no pool yet."""
+    """Dashboard path: returns cached stored matches immediately; scores new pool
+    jobs and background-scrapes missing titles in a single daemon thread so the
+    HTTP worker is never blocked by AI calls."""
     log = logger.add if logger else print
     user_id, gender = user.get("id"), user.get("gender")
     titles = _user_titles(user_id)
     if not titles:
-        return {"matches": [], "pending_titles": []}
+        return {"matches": [], "pending_titles": [], "scoring_in_progress": False}
     scored_ids = _already_scored(user_id)
     cutoff = datetime.now(timezone.utc) - timedelta(days=config.JOB_MAX_DAYS)
     pending, to_score = [], []
     for t in titles:
         all_pooled = safe_select("job_pool", search_keyword=t["normalized"])
         if not all_pooled:
-            # Only mark pending if not already scraped recently — a fresh scrape
-            # with 0 results means the title is too niche; don't retry endlessly
             from services.scraper import is_fresh
             if not is_fresh(t.get("last_scraped")):
                 pending.append(t["keyword"])
             continue
-        # Enforce same date cutoff as search_jobs() — exclude stale but keep undated
         pooled = []
         for pj in all_pooled:
             p = pj.get("posted_at")
@@ -150,41 +162,51 @@ def refresh_matches_for_user(user, logger=None):
                 continue
             to_score.append(j)
     to_score = _dedupe(to_score, scored_ids)
-    if to_score:
-        if len(to_score) > config.MAX_JOBS_PER_USER:
-            to_score = to_score[:config.MAX_JOBS_PER_USER]
-        log(f"  🤖 Scoring {len(to_score)} new pooled jobs...")
-        scored = score_jobs_for_user(to_score, user)
-        _save_matches(user_id, scored, emailed_flag=False)
-    if pending:
-        def bg():
-            for kw in pending:
+    if len(to_score) > config.MAX_JOBS_PER_USER:
+        to_score = to_score[:config.MAX_JOBS_PER_USER]
+
+    scoring_in_progress = bool(to_score) or bool(pending)
+
+    # Fire all heavy work (AI scoring + scraping) in one background thread so
+    # the HTTP response returns immediately with whatever is already stored.
+    if scoring_in_progress:
+        _to_score = list(to_score)
+        _pending = list(pending)
+        _user = dict(user)
+        def _bg():
+            if _to_score:
+                log(f"  🤖 BG scoring {len(_to_score)} new pooled jobs...")
+                scored = score_jobs_for_user(_to_score, _user)
+                _save_matches(user_id, scored, emailed_flag=False)
+            for kw in _pending:
                 try:
                     search_jobs(kw, user_gender=gender)
                 except Exception as e:
-                    print(f"  ❌ bg scrape {kw}: {e}")
                     log_error("matcher.refresh_matches_for_user.bg_scrape", str(e), context=kw)
-        threading.Thread(target=bg, daemon=True).start()
-        log(f"  🌐 Background scraping {len(pending)} titles")
+        threading.Thread(target=_bg, daemon=True).start()
+        if to_score:
+            log(f"  🤖 Scoring {len(to_score)} new pooled jobs in background")
+        if pending:
+            log(f"  🌐 Background scraping {len(pending)} titles")
 
-    # Return all stored 60%+ matches, excluding skipped/applied
+    # Return all stored 60%+ matches immediately (scoring results appear on next refresh)
     try:
         rows = get_supabase().table("user_job_matches").select(
             "job_id,score,status,match_reason,quality_score").eq(
             "user_id", user_id).gte("score", config.MATCH_THRESHOLD).eq(
             "status", "new").execute().data or []
     except Exception as e:
-        print(f"  ⚠️ matches read: {e}")
         log_error("matcher.refresh_matches_for_user.matches_read", str(e))
         rows = []
     if not rows:
-        return {"matches": [], "pending_titles": pending}
+        return {"matches": [], "pending_titles": pending,
+                "scoring_in_progress": scoring_in_progress}
     ids = [r["job_id"] for r in rows]
     rmap = {r["job_id"]: r for r in rows}
     try:
-        jobs = get_supabase().table("job_pool").select("*").in_("id", ids).execute().data or []
+        jobs = get_supabase().table("job_pool").select(
+            _JOB_POOL_COLS).in_("id", ids).execute().data or []
     except Exception as e:
-        print(f"  ⚠️ jobs read: {e}")
         log_error("matcher.refresh_matches_for_user.jobs_read", str(e))
         jobs = []
     for j in jobs:
@@ -194,7 +216,6 @@ def refresh_matches_for_user(user, logger=None):
         j["match_reason"] = r.get("match_reason") or j.get("match_reason")
         j["quality_score"] = r.get("quality_score") or quality_score(j)
     jobs.sort(key=lambda x: (x.get("score", 0), x.get("quality_score", 0)), reverse=True)
-    # Deduplicate by link — same job may be scraped from multiple platforms
     seen_links, deduped = set(), []
     for j in jobs:
         link = (j.get("link") or "").strip()
@@ -204,14 +225,14 @@ def refresh_matches_for_user(user, logger=None):
             seen_links.add(link)
         deduped.append(j)
 
-    # Tag each match as industry-specific or cross-industry
     user_industry = _infer_user_industry(user_id)
     for j in deduped:
         j["industry_match"] = bool(
             user_industry and j.get("industry") and j["industry"] == user_industry
         )
 
-    return {"matches": deduped, "pending_titles": pending, "user_industry": user_industry}
+    return {"matches": deduped, "pending_titles": pending,
+            "scoring_in_progress": scoring_in_progress, "user_industry": user_industry}
 
 def set_job_status(user_id, job_id, status):
     """Update job status. Accepted: new | skipped | applied | interview | offer | rejected."""
