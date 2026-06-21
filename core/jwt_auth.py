@@ -4,7 +4,7 @@ Callers still pass user_id in the body; if a bearer token is present we
 verify it actually belongs to that user_id. With REQUIRE_AUTH=true, a
 missing or invalid token is rejected outright instead of falling back to
 the unverified body user_id.
-
+ 
 Fix notes (2026-06-21):
   - Supabase JWT secrets are base64url-encoded strings. PyJWT needs the
       raw bytes, so we decode the secret before passing it to jwt.decode().
