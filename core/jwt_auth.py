@@ -31,8 +31,8 @@ def _decode_secret(raw: str) -> bytes:
                     # Add padding if needed
                     padded = raw + "=" * (-len(raw) % 4)
                     return base64.urlsafe_b64decode(padded)
-except Exception:
-        return raw.encode("utf-8")
+        except Exception:
+          return raw.encode("utf-8")
 
 
 def verify_jwt(token: str):
