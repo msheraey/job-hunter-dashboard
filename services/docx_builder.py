@@ -96,7 +96,10 @@ def _section_header(doc, text):
 
 def _bullet_para(doc, text):
     """ATS-safe bullet: native Word list style, no manual characters."""
-    p = doc.add_paragraph(style="List Bullet")
+    try:
+        p = doc.add_paragraph(style="List Bullet")
+    except KeyError:
+        p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(1)
     p.paragraph_format.space_after  = Pt(1)
     p.paragraph_format.left_indent  = Inches(0.25)

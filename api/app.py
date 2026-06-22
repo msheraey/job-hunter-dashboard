@@ -499,11 +499,10 @@ def api_generate_cv():
     if not user.get("cv_text") and not user.get("profile_summary"):
         return jsonify({"error": "Please add your profile summary or upload your CV first"}), 422
 
+    from services.cv_generator import generate_cover_letter_docx, generate_cv_docx
+    from core.error_log import log_error as _log_error
+    import base64
     try:
-        from services.cv_generator import generate_cover_letter_docx, generate_cv_docx
-        from core.error_log import log_error as _log_error
-        import base64
-
         cl_bytes, cl_file, cl_plain = generate_cover_letter_docx(user, jobs[0])
         cv_bytes, cv_file, cv_plain = generate_cv_docx(user, jobs[0])
     except Exception as e:
