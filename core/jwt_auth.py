@@ -53,7 +53,9 @@ def resolve_user_id(body, request):
     from flask import jsonify
     claimed = body.get("user_id")
     token = _bearer_token(request)
-    if not token:
+    # If no JWT secret is configured we cannot verify tokens, so treat the
+    # request the same as if no token was sent (respecting REQUIRE_AUTH).
+    if not token or not config.SUPABASE_JWT_SECRET:
         if config.REQUIRE_AUTH:
             return None, (jsonify({"error": "authorization required"}), 401)
         return claimed, None
