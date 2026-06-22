@@ -23,7 +23,8 @@ CL_MAX_TOKENS = 1000
 
 
 def _validate_and_repair(ai_data, parsed, user):
-    if not ai_data:
+    # Guard: AI sometimes returns a list or None
+    if not isinstance(ai_data, dict):
         ai_data = {}
     for field in ("name", "phone", "email", "linkedin", "location"):
         if not ai_data.get(field) and parsed.get(field):
@@ -34,8 +35,9 @@ def _validate_and_repair(ai_data, parsed, user):
         ai_data["email"] = user["email"]
 
     original_roles = parsed.get("_raw_experience") or []
-    ai_roles = ai_data.get("experience") or []
-    # Key on (title, company) so two roles at the same company are treated as distinct
+    # Guard: experience items must be dicts
+    raw_ai_roles = ai_data.get("experience") or []
+    ai_roles = [r for r in raw_ai_roles if isinstance(r, dict)]
     ai_role_keys = {
         ((r.get("title") or "").lower().strip(), (r.get("company") or "").lower().strip())
         for r in ai_roles
@@ -60,10 +62,17 @@ def _validate_and_repair(ai_data, parsed, user):
 
     if not ai_data.get("education") and parsed.get("_raw_education"):
         ai_data["education"] = [{"degree": l, "institution": "", "year": ""} for l in parsed["_raw_education"][:6]]
+    else:
+        # Ensure all education entries are dicts
+        ai_data["education"] = [e for e in (ai_data.get("education") or []) if isinstance(e, dict)]
     if not ai_data.get("certifications") and parsed.get("_raw_certs"):
         ai_data["certifications"] = [{"name": l, "issuer": "", "year": ""} for l in parsed["_raw_certs"][:8]]
+    else:
+        ai_data["certifications"] = [c for c in (ai_data.get("certifications") or []) if isinstance(c, (dict, str))]
     if not ai_data.get("skills") and parsed.get("_raw_skills"):
         ai_data["skills"] = {"core": parsed["_raw_skills"][:8], "technical": [], "languages": []}
+    elif not isinstance(ai_data.get("skills"), dict):
+        ai_data["skills"] = {}
     return ai_data
 
 
