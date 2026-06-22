@@ -120,7 +120,7 @@ def search_and_score_for_user(user, logger=None):
 _JOB_POOL_COLS = (
     "id,title,company,location,posted_at,link,platform,salary,"
     "salary_min_aed,salary_max_aed,industry,seniority,remote_status,"
-    "visa_likelihood,quality_score,description,fingerprint"
+    "visa_likelihood,quality_score,description,fingerprint,link_active"
 )
 
 
