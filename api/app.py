@@ -486,58 +486,55 @@ def api_set_account_link():
 # ── CV: generate + upload ────────────────────────────────────
 @app.route("/api/generate-cv", methods=["POST"])
 def api_generate_cv():
-    body = request.get_json(silent=True) or {}
-    user_id, err = resolve_user_id(body, request)
-    if err:
-        return err
-    user = _user(user_id)
-    jobs = safe_select("job_pool", id=body.get("job_id"))
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-    if not jobs:
-        return jsonify({"error": "Job not found"}), 404
-    if not user.get("cv_text") and not user.get("profile_summary"):
-        return jsonify({"error": "Please add your profile summary or upload your CV first"}), 422
-
+    import traceback, base64
     from services.cv_generator import generate_cover_letter_docx, generate_cv_docx
-    from core.error_log import log_error as _log_error
-    import base64
     try:
+        body = request.get_json(silent=True) or {}
+        user_id, err = resolve_user_id(body, request)
+        if err:
+            return err
+        user = _user(user_id)
+        jobs = safe_select("job_pool", id=body.get("job_id"))
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        if not jobs:
+            return jsonify({"error": "Job not found"}), 404
+        if not user.get("cv_text") and not user.get("profile_summary"):
+            return jsonify({"error": "Please add your profile summary or upload your CV first"}), 422
+
         cl_bytes, cl_file, cl_plain = generate_cover_letter_docx(user, jobs[0])
         cv_bytes, cv_file, cv_plain = generate_cv_docx(user, jobs[0])
+
+        if not cl_bytes and not cv_bytes:
+            return jsonify({"error": "Generation failed — all AI providers unavailable, try again"}), 502
+
+        result = {
+            "cover_letter": cl_plain,
+            "tailored_cv": cv_plain,
+            "cover_letter_ok": bool(cl_bytes),
+            "tailored_cv_ok": bool(cv_bytes),
+            "cl_docx_b64": base64.b64encode(cl_bytes).decode() if cl_bytes else None,
+            "cv_docx_b64": base64.b64encode(cv_bytes).decode() if cv_bytes else None,
+            "cl_filename": cl_file,
+            "cv_filename": cv_file,
+            "job_title": jobs[0].get("title", ""),
+            "company": jobs[0].get("company", ""),
+        }
+        def send_bg():
+            try:
+                from email_service import send_cv_cover_letter_email
+                send_cv_cover_letter_email(
+                    user["email"], user.get("name", ""),
+                    jobs[0].get("title"), jobs[0].get("company"),
+                    cv_plain, cl_plain)
+            except Exception:
+                pass
+        _bg_pool.submit(send_bg)
+        return jsonify(result)
     except Exception as e:
-        import traceback
         tb = traceback.format_exc()
-        _log_error("app.generate_cv", f"{str(e)}\n{tb[:400]}")
-        return jsonify({"error": f"Generation failed: {str(e)[:200]}"}), 500
-
-    if not cl_bytes and not cv_bytes:
-        return jsonify({"error": "Generation failed — all AI providers unavailable, try again"}), 502
-
-    result = {
-        "cover_letter": cl_plain,
-        "tailored_cv": cv_plain,
-        "cover_letter_ok": bool(cl_bytes),
-        "tailored_cv_ok": bool(cv_bytes),
-        "cl_docx_b64": base64.b64encode(cl_bytes).decode() if cl_bytes else None,
-        "cv_docx_b64": base64.b64encode(cv_bytes).decode() if cv_bytes else None,
-        "cl_filename": cl_file,
-        "cv_filename": cv_file,
-        "job_title": jobs[0].get("title", ""),
-        "company": jobs[0].get("company", ""),
-    }
-    # Email in background
-    def send_bg():
-        try:
-            from email_service import send_cv_cover_letter_email
-            send_cv_cover_letter_email(
-                user["email"], user.get("name", ""),
-                jobs[0].get("title"), jobs[0].get("company"),
-                cv_plain, cl_plain)
-        except Exception as e:
-            _log_error("app.generate_cv_email", str(e))
-    _bg_pool.submit(send_bg)
-    return jsonify(result)
+        print(f"  ❌ generate-cv error: {tb}")
+        return jsonify({"error": str(e), "traceback": tb[-800:]}), 500
 
 @app.route("/api/download-cv", methods=["POST"])
 def api_download_cv():
