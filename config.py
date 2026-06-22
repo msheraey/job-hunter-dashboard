@@ -18,9 +18,7 @@ RESEND_API_KEY      = os.environ.get("RESEND_API_KEY")
 SERPER_API_KEY      = os.environ.get("SERPER_API_KEY")  # optional — premium company lookup
 SERPAPI_KEY         = os.environ.get("SERPAPI_KEY")  # optional — SerpApi Google Jobs, tried before DataForSEO
 ADMIN_TOKEN         = os.environ.get("ADMIN_TOKEN")  # required to call admin trigger routes
-SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")  # Supabase project JWT secret (Settings → API)
 REDIS_URL           = os.environ.get("REDIS_URL")  # optional — shared circuit-breaker state across workers
-REQUIRE_AUTH        = os.environ.get("REQUIRE_AUTH", "false").lower() == "true"  # strict JWT enforcement once frontend sends tokens
 PUBLIC_BASE_URL     = os.environ.get("PUBLIC_BASE_URL")  # optional — this deployment's public URL, enables DataForSEO pingback
 
 # ── CORS ──────────────────────────────────────────────────────
