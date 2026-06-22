@@ -67,5 +67,9 @@ def set_link(user_id: str, site: str, status: str, meta: Optional[dict] = None):
     }
     if status == "linked":
         row["linked_at"] = datetime.now(timezone.utc).isoformat()
-    return safe_upsert("user_linked_accounts", row,
-                       on_conflict="user_id,site", label="link_account")
+    # Try upsert first; fall back to delete+insert if the unique constraint is missing
+    if safe_upsert("user_linked_accounts", row, on_conflict="user_id,site", label="link_account"):
+        return True
+    from core.db import safe_delete, safe_insert
+    safe_delete("user_linked_accounts", label="link_account_del", user_id=user_id, site=site)
+    return bool(safe_insert("user_linked_accounts", row, label="link_account_ins"))
