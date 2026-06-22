@@ -506,8 +506,10 @@ def api_generate_cv():
         cl_bytes, cl_file, cl_plain = generate_cover_letter_docx(user, jobs[0])
         cv_bytes, cv_file, cv_plain = generate_cv_docx(user, jobs[0])
     except Exception as e:
-        _log_error("app.generate_cv", str(e))
-        return jsonify({"error": f"Generation failed: {str(e)[:120]}"}), 500
+        import traceback
+        tb = traceback.format_exc()
+        _log_error("app.generate_cv", f"{str(e)}\n{tb[:400]}")
+        return jsonify({"error": f"Generation failed: {str(e)[:200]}"}), 500
 
     if not cl_bytes and not cv_bytes:
         return jsonify({"error": "Generation failed — all AI providers unavailable, try again"}), 502
