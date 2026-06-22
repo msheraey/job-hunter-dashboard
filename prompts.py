@@ -92,7 +92,7 @@ def tailored_cv_prompt(user_profile, cv_text, job, parsed_structure=None):
                 lines.append(f"  • {b}")
         exp_block = "\n".join(lines)
     else:
-        exp_block = (cv_text or '')[:6000]
+        exp_block = (cv_text or '')[:8000]
         exp_count = cv_text.count("\n") // 8 if cv_text else 0
 
     return f"""You are an expert ATS-optimised CV writer for the UAE job market.
@@ -110,7 +110,7 @@ CANDIDATE'S COMPLETE WORK HISTORY (ALL {exp_count} ROLES — you MUST include ev
 {exp_block}
 
 ADDITIONAL CV DATA:
-{(cv_text or '')[:3000]}
+{(cv_text or '')[:5000]}
 
 STEP 1 — KEYWORD EXTRACTION (do this mentally before writing):
 Identify the 10-15 most important keywords from the job description: required skills, tools,
