@@ -78,7 +78,7 @@ Return ONLY valid JSON — no markdown, no preamble:
 def tailored_cv_prompt(user_profile, cv_text, job, parsed_structure=None):
     title = job.get('title', '')
     company = job.get('company', '')
-    description = (job.get('description') or '')[:1200]
+    description = (job.get('description') or '')[:2500]
 
     exp_block = ""
     exp_count = 0

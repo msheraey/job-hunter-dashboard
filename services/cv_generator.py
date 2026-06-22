@@ -18,8 +18,8 @@ from services.docx_builder import build_cv, build_cover_letter
 from services.cv_parser_structured import extract_structure
 from utils.ai_json import extract_json as _parse_json
 
-CV_MAX_TOKENS = 3200
-CL_MAX_TOKENS = 900
+CV_MAX_TOKENS = 4000
+CL_MAX_TOKENS = 1000
 
 
 def _validate_and_repair(ai_data, parsed, user):
