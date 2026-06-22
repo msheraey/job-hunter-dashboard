@@ -205,6 +205,18 @@ def api_users():
 def api_system_health():
     return jsonify(selftest_all())
 
+@app.route("/api/check-links", methods=["POST"])
+def api_check_links():
+    err = require_admin()
+    if err:
+        return err
+    from services.link_checker import check_links
+    from core.logger import RunLogger
+    logger = RunLogger("check_links")
+    result = check_links(log=logger.add)
+    logger.finish(success=True)
+    return jsonify(result)
+
 @app.route("/api/credit-status")
 def api_credit_status():
     from core.selftest import check_dataforseo
@@ -714,7 +726,7 @@ def api_application_board():
     try:
         jobs = get_supabase().table("job_pool").select(
             "id,title,company,location,posted_at,link,platform,salary,"
-            "salary_min_aed,salary_max_aed,industry,seniority,remote_status,visa_likelihood"
+            "salary_min_aed,salary_max_aed,industry,seniority,remote_status,visa_likelihood,link_active"
         ).in_("id", ids).execute().data or []
     except Exception as e:
         return jsonify({"error": str(e)[:200]}), 500

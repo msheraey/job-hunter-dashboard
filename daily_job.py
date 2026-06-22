@@ -38,6 +38,10 @@ def run_daily():
         logger.add("\n📦 STEP 1: Archiving old jobs...")
         archive_old_jobs(log=logger.add)
 
+        logger.add("\n🔗 STEP 1.5: Checking job links...")
+        from services.link_checker import check_links
+        check_links(log=logger.add)
+
         logger.add("\n📡 STEP 2: Scraping all titles...")
         run_full_scrape(logger)
 
