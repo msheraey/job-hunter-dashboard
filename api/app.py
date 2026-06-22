@@ -38,7 +38,7 @@ _bg_pool = concurrent.futures.ThreadPoolExecutor(max_workers=20, thread_name_pre
 # Per-user refresh rate limiter (in-memory): prevents rapid AI-budget burn from repeated calls.
 _refresh_ts: dict = {}
 _refresh_lock = threading.Lock()
-_REFRESH_COOLDOWN_S = 30
+_REFRESH_COOLDOWN_S = 5
 
 @app.after_request
 def after_request(resp):
