@@ -57,17 +57,24 @@ def _already_scored(user_id):
     return {r["job_id"] for r in rows}
 
 def _dedupe(jobs, scored_ids):
-    out, links, fps = [], set(), set()
+    out, links, fps, title_cos = [], set(), set(), set()
     for j in jobs:
         if j.get("id") in scored_ids:
             continue
-        link, fp = j.get("link", ""), j.get("fingerprint", "")
+        link = (j.get("link") or "").strip()
+        fp   = (j.get("fingerprint") or "").strip()
+        title_co = (
+            (j.get("title") or "").lower().strip(),
+            (j.get("company") or "").lower().strip(),
+        )
         if (link and link in links) or (fp and fp in fps):
             continue
-        if link:
-            links.add(link)
-        if fp:
-            fps.add(fp)
+        if title_co[0] and title_co[1] and title_co in title_cos:
+            continue
+        if link:   links.add(link)
+        if fp:     fps.add(fp)
+        if title_co[0] and title_co[1]:
+            title_cos.add(title_co)
         out.append(j)
     return out
 
@@ -216,13 +223,24 @@ def refresh_matches_for_user(user, logger=None):
         j["match_reason"] = r.get("match_reason") or j.get("match_reason")
         j["quality_score"] = r.get("quality_score") or quality_score(j)
     jobs.sort(key=lambda x: (x.get("score", 0), x.get("quality_score", 0)), reverse=True)
-    seen_links, deduped = set(), []
+    seen_links, seen_fps, seen_title_cos, deduped = set(), set(), set(), []
     for j in jobs:
-        link = (j.get("link") or "").strip()
+        link     = (j.get("link") or "").strip()
+        fp       = (j.get("fingerprint") or "").strip()
+        title_co = (
+            (j.get("title") or "").lower().strip(),
+            (j.get("company") or "").lower().strip(),
+        )
         if link and link in seen_links:
             continue
-        if link:
-            seen_links.add(link)
+        if fp and fp in seen_fps:
+            continue
+        if title_co[0] and title_co[1] and title_co in seen_title_cos:
+            continue
+        if link:   seen_links.add(link)
+        if fp:     seen_fps.add(fp)
+        if title_co[0] and title_co[1]:
+            seen_title_cos.add(title_co)
         deduped.append(j)
 
     user_industry = _infer_user_industry(user_id)
